@@ -151,6 +151,7 @@ def get_settings(config_path: str = os.path.join(os.path.dirname(os.path.dirname
 
     settings = Settings(**cfg)
 
-    # Configure logger level
-    logger.setLevel(getattr(__import__("logging").logging, settings.logging.level.upper(), 20))
+    # Configure logger level correctly
+    import logging as _logging
+    logger.setLevel(getattr(_logging, settings.logging.level.upper(), _logging.INFO))
     return settings

@@ -1,0 +1,67 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.eggs/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+.env
+.env.*
+.python-version
+
+# Logs & runtime
+logs/
+*.log
+uvicorn.log
+*.pid
+*.out
+*.err
+
+# Test/coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# Type checkers & linters
+.mypy_cache/
+.pyre/
+.pytype/
+.ruff_cache/
+
+# Build artifacts
+build/
+dist/
+site/
+*.wheel
+*.whl
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Editors/IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Caches
+.cache/
+
+# Local data
+*.sqlite3
+
+# Tooling
+.cursor/

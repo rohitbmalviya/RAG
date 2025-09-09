@@ -55,7 +55,7 @@ class VectorDBConfig(BaseModel):
     hosts: List[str] = Field(default_factory=lambda: ["http://localhost:9200"])
     username: Optional[str] = None
     password: Optional[str] = None
-    index: str = "properties"
+    index: str = "rag_properties"
     similarity: str = "cosine"
     refresh_on_write: bool = False
     dims: Optional[int] = None

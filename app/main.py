@@ -106,8 +106,8 @@ def _run_ingestion(batch_size: int, rebuild_index: bool) -> None:
     settings = state.settings
     if rebuild_index:
         try:
-            dims = state.embedder.get_dimension()
-            state.vector_store.ensure_index(dims)
+            dims = state.vector_store._config.dims if state.vector_store and state.vector_store._config.dims else state.embedder.get_dimension()  # type: ignore[arg-type]
+            state.vector_store.ensure_index(int(dims))  # type: ignore[arg-type]
             state.index_ready = True
         except Exception as exc:
             logger.error("Failed to prepare index: %s", exc)
@@ -118,6 +118,7 @@ def _run_ingestion(batch_size: int, rebuild_index: bool) -> None:
     total_indexed = 0
 
     for docs_batch in load_documents(settings, batch_size=batch_size):
+        logger.info("Fetched %s rows from DB", len(docs_batch))
         chunks = chunk_documents(
             docs_batch,
             chunk_size=settings.chunking.chunk_size,
@@ -126,12 +127,17 @@ def _run_ingestion(batch_size: int, rebuild_index: bool) -> None:
         )
         if not chunks:
             continue
+        logger.info("Created %s chunks", len(chunks))
         embeddings = state.embedder.embed_texts([c.text for c in chunks], task_type="retrieval_document")
+        logger.info("Generated %s embeddings", len(embeddings))
         success, errors = state.vector_store.upsert(chunks, embeddings)
+        if success > 0 and not state.index_ready:
+            state.index_ready = True
         total_rows += len(docs_batch)
         total_chunks += len(chunks)
         total_indexed += success
-        logger.info("Ingested rows=%s chunks=%s indexed=%s errors=%s", total_rows, total_chunks, total_indexed, errors)
+        logger.info("Upserted %s chunks (errors=%s)", success, errors)
+        logger.info("Ingested totals rows=%s chunks=%s indexed=%s", total_rows, total_chunks, total_indexed)
 
 
 @app.post("/ingest")

@@ -12,6 +12,10 @@ from .utils import get_logger
 class EmbeddingClient:
     def __init__(self, config: EmbeddingConfig) -> None:
         self._config = config
+        # Fallback to env if not set in config
+        if not config.api_key:
+            import os as _os
+            config.api_key = _os.getenv("GOOGLE_API_KEY")
         if config.api_key:
             genai.configure(api_key=config.api_key)
         self._logger = get_logger(__name__)
@@ -27,13 +31,17 @@ class EmbeddingClient:
 
     def embed_texts(self, texts: List[str], task_type: Optional[str] = None) -> List[List[float]]:
         embeddings: List[List[float]] = []
-        for text in texts:
-            try:
-                vector = self._embed_single(text, task_type=task_type)
-            except RetryError as exc:
-                self._logger.error("Failed to embed text after retries: %s", exc)
-                raise
-            embeddings.append(vector)
+        batch_size = max(1, self._config.batch_size)
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i+batch_size]
+            # gemini embed_content currently lacks official batch API; perform per-text with retry
+            for text in batch:
+                try:
+                    vector = self._embed_single(text, task_type=task_type)
+                except RetryError as exc:
+                    self._logger.error("Failed to embed text after retries: %s", exc)
+                    raise
+                embeddings.append(vector)
         return embeddings
 
     def get_dimension(self) -> int:

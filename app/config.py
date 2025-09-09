@@ -40,6 +40,7 @@ class DatabaseConfig(BaseModel):
 class ChunkingConfig(BaseModel):
     chunk_size: int = 500
     chunk_overlap: int = 50
+    unit: str = "token"  # "token" or "char"
 
 
 class EmbeddingConfig(BaseModel):
@@ -54,15 +55,17 @@ class VectorDBConfig(BaseModel):
     hosts: List[str] = Field(default_factory=lambda: ["http://localhost:9200"])
     username: Optional[str] = None
     password: Optional[str] = None
-    index: str = "rag_properties"
+    index: str = "properties"
     similarity: str = "cosine"
     refresh_on_write: bool = False
+    dims: Optional[int] = None
 
 
 class RetrievalConfig(BaseModel):
     top_k: int = 5
     num_candidates_multiplier: int = 8
     filter_fields: List[str] = Field(default_factory=list)
+    reranker: Optional[Dict[str, Any]] = None  # optional reranker stub
 
 
 class LLMConfig(BaseModel):
@@ -150,6 +153,10 @@ def get_settings(config_path: str = os.path.join(os.path.dirname(os.path.dirname
             logger.warning("Failed to parse DATABASE_URL: %s", exc)
 
     settings = Settings(**cfg)
+
+    # Fallback: load API keys from environment if not provided in config
+    if not settings.embedding.api_key:
+        settings.embedding.api_key = os.getenv("GOOGLE_API_KEY")
 
     # Configure logger level correctly
     import logging as _logging

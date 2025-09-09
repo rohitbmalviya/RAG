@@ -82,8 +82,8 @@ async def on_startup() -> None:
     assert state.settings is not None
     if state.settings.app.eager_init:
         try:
-            dims = state.embedder.get_dimension()  # type: ignore[arg-type]
-            state.vector_store.ensure_index(dims)  # type: ignore[arg-type]
+            dims = state.vector_store._config.dims if state.vector_store and state.vector_store._config.dims else state.embedder.get_dimension()  # type: ignore[arg-type]
+            state.vector_store.ensure_index(int(dims))  # type: ignore[arg-type]
             state.index_ready = True
         except Exception as exc:
             logger.warning("Failed eager index init: %s", exc)
@@ -118,7 +118,12 @@ def _run_ingestion(batch_size: int, rebuild_index: bool) -> None:
     total_indexed = 0
 
     for docs_batch in load_documents(settings, batch_size=batch_size):
-        chunks = chunk_documents(docs_batch, chunk_size=settings.chunking.chunk_size, chunk_overlap=settings.chunking.chunk_overlap)
+        chunks = chunk_documents(
+            docs_batch,
+            chunk_size=settings.chunking.chunk_size,
+            chunk_overlap=settings.chunking.chunk_overlap,
+            unit=settings.chunking.unit,
+        )
         if not chunks:
             continue
         embeddings = state.embedder.embed_texts([c.text for c in chunks], task_type="retrieval_document")

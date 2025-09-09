@@ -1,0 +1,56 @@
+version: '3.8'
+
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.17.1
+    container_name: elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=true
+      - ELASTIC_PASSWORD=DkIedPPSCb
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    ports:
+      - "9200:9200"
+    networks:
+      - elknet
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.17.1
+    container_name: kibana
+    depends_on:
+      - elasticsearch
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - ELASTICSEARCH_USERNAME=kibana_system
+      - ELASTICSEARCH_PASSWORD=DkIedPPSCb  # Set this to same as ELASTIC_PASSWORD initially
+    ports:
+      - "5601:5601"
+    networks:
+      - elknet
+
+  redis:
+    image: redis:latest
+    container_name: redis
+    ports:
+      - "6379:6379"
+    networks:
+      - elknet
+    volumes:
+      - redis_data:/data
+
+volumes:
+  es_data:
+  redis_data:
+
+networks:
+  elknet:
+    driver: bridge
+
+
+# curl -u elastic:DkIedPPSCb -X POST "localhost:9200/_security/user/kibana_system/_password"   -H "Content-Type: application/json"   -d '{"password": "DkIedPPSCb"}'

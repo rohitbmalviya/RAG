@@ -2,11 +2,12 @@ app:
   name: "RAG Pipeline"
   host: 0.0.0.0
   port: 8000
-  eager_init: true
+  eager_init: false
 logging:
   level: INFO
 database:
   driver: postgres
+  # Prefer DB_URL in .env. These fields are fallbacks and will be overridden by DB_URL when set.
   host: ${DB_HOST}
   port: ${DB_PORT}
   name: ${DB_NAME}
@@ -20,30 +21,29 @@ database:
     - emirate
     - city
     - district
-    - property_type_id
     - rent_charge
-    - lease_duration
-    - amenities
 
 chunking:
   chunk_size: 500
   chunk_overlap: 50
+  unit: token # "token" or "char"
 
 embedding:
   provider: google
-  model: ${GOOGLE_GEMINI_EMBED_MODEL}
+  model: gemini-embedding-001
   api_key: ${GOOGLE_API_KEY}
   batch_size: 64
 
 vector_db:
   provider: elasticsearch
   hosts:
-    - ${ELASTIC_HOST:-http://localhost:9200}
+    - ${ELASTIC_HOST}
   username: ${ELASTIC_USERNAME}
   password: ${ELASTIC_PASSWORD}
-  index: rag_properties
+  index: properties
   similarity: cosine
   refresh_on_write: false
+  dims: null # set to an integer to skip probing embedding dimension
 
 retrieval:
   top_k: 5
@@ -55,7 +55,7 @@ retrieval:
 
 llm:
   provider: google
-  model: ${GOOGLE_GEMINI_MODEL}
+  model: gemini-2.5-flash-lite
   temperature: 0.2
   max_output_tokens: 1024
 

@@ -1,4 +1,4 @@
-version: '3.8'
+version: "3.8"
 
 services:
   elasticsearch:
@@ -7,7 +7,7 @@ services:
     environment:
       - discovery.type=single-node
       - xpack.security.enabled=true
-      - ELASTIC_PASSWORD=DkIedPPSCb
+      - VECTOR_DB_PASSWORD=DkIedPPSCb
       - ES_JAVA_OPTS=-Xms1g -Xmx1g
     ulimits:
       memlock:
@@ -28,7 +28,7 @@ services:
     environment:
       - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
       - ELASTICSEARCH_USERNAME=kibana_system
-      - ELASTICSEARCH_PASSWORD=DkIedPPSCb  # Set this to same as ELASTIC_PASSWORD initially
+      - ELASTICSEARCH_PASSWORD=DkIedPPSCb # Set this to same as VECTOR_DB_PASSWORD initially
     ports:
       - "5601:5601"
     networks:
@@ -51,6 +51,4 @@ volumes:
 networks:
   elknet:
     driver: bridge
-
-
 # curl -u elastic:DkIedPPSCb -X POST "localhost:9200/_security/user/kibana_system/_password"   -H "Content-Type: application/json"   -d '{"password": "DkIedPPSCb"}'

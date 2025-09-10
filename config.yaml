@@ -80,16 +80,16 @@ chunking:
 
 embedding:
   provider: google
-  model: ${LLM_EMBED_MODEL}
+  model: ${LLM_EMBED_MODEL_NAME}
   api_key: ${LLM_MODEL_API_KEY}
   batch_size: 64
 
 vector_db:
   provider: elasticsearch
   hosts:
-    - ${ELASTIC_HOST}
-  username: ${ELASTIC_USERNAME}
-  password: ${ELASTIC_PASSWORD}
+    - ${VECTOR_DB_HOST}
+  username: ${VECTOR_DB_USERNAME}
+  password: ${VECTOR_DB_PASSWORD}
   index: rag_properties
   similarity: cosine
   refresh_on_write: false
@@ -121,7 +121,7 @@ retrieval:
 
 llm:
   provider: google
-  model: ${LLM_MODEL_MODEL}
+  model: ${LLM_MODEL_NAME}
   temperature: 0.2
   max_output_tokens: 1024
 

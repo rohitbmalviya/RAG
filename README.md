@@ -38,7 +38,7 @@ Edit `config.yaml` or set environment variables referenced in it. Key items:
 - `database.table` and `database.columns`
 - `chunking.unit` (`token` or `char`), `chunk_size`, `chunk_overlap`
 - `embedding.model` and `LLM_MODEL_API_KEY`
-- Elasticsearch `ELASTIC_HOST`, `ELASTIC_USERNAME`, `ELASTIC_PASSWORD`, `vector_db.index`, `vector_db.dims`
+- Elasticsearch `VECTOR_DB_HOST`, `VECTOR_DB_USERNAME`, `VECTOR_DB_PASSWORD`, `vector_db.index`, `vector_db.dims`
 - Retrieval `top_k`
 
 ### .env example
@@ -48,9 +48,9 @@ Create a `.env` file (or copy from `.env.example` if present):
 ```bash
 LLM_MODEL_API_KEY=your_google_api_key
 DB_URL=postgresql://postgres:postgres@localhost:5432/leasebnb
-ELASTIC_HOST=http://localhost:9200
-ELASTIC_USERNAME=elastic
-ELASTIC_PASSWORD=changeme
+VECTOR_DB_HOST=http://localhost:9200
+VECTOR_DB_USERNAME=elastic
+VECTOR_DB_PASSWORD=changeme
 ```
 
 ## Start the Application
@@ -71,8 +71,8 @@ Create a `.env` file in the project root with the following content:
 ```bash
 # Google API Configuration
 LLM_MODEL_API_KEY=your_google_api_key_here
-LLM_EMBED_MODEL=your_embed_model_name
-LLM_MODEL_MODEL=your_model_name
+LLM_EMBED_MODEL_NAME=your_embed_model_name
+LLM_MODEL_NAME=your_model_name
 
 # Database Configuration
 DB_URL=postgresql://postgres:postgres@localhost:5432/leasebnb
@@ -84,9 +84,9 @@ DB_USER=postgres
 DB_PASSWORD=postgres
 
 # Elasticsearch Configuration
-ELASTIC_HOST=http://localhost:9200
-ELASTIC_USERNAME=elastic
-ELASTIC_PASSWORD=DkIedPPSCb
+VECTOR_DB_HOST=http://localhost:9200
+VECTOR_DB_USERNAME=elastic
+VECTOR_DB_PASSWORD=DkIedPPSCb
 ```
 
 **Important:** Replace `your_google_api_key_here` with your actual Google API key.

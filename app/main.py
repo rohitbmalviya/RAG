@@ -67,14 +67,35 @@ def initialize_components() -> None:
     state.settings = settings
 
     if not settings.database.columns:
+        logger.error("database.columns must be configured in config.yaml")
         raise RuntimeError("database.columns must be configured")
     if settings.retrieval.filter_fields is None:
+        logger.warning("retrieval.filter_fields is None; treating as empty list")
         settings.retrieval.filter_fields = []  
 
-    embedder = EmbeddingClient(settings.embedding)
-    store = ElasticsearchVectorStore(settings.vector_db)
-    retriever = Retriever(embedder, store, settings.retrieval)
-    llm = LLMClient(settings.llm, api_key=settings.embedding.api_key)
+    try:
+        embedder = EmbeddingClient(settings.embedding)
+    except Exception as exc:
+        logger.error("Failed to initialize EmbeddingClient: %s", exc)
+        raise
+
+    try:
+        store = ElasticsearchVectorStore(settings.vector_db)
+    except Exception as exc:
+        logger.error("Failed to initialize ElasticsearchVectorStore: %s", exc)
+        raise
+
+    try:
+        retriever = Retriever(embedder, store, settings.retrieval)
+    except Exception as exc:
+        logger.error("Failed to initialize Retriever: %s", exc)
+        raise
+
+    try:
+        llm = LLMClient(settings.llm, api_key=settings.embedding.api_key)
+    except Exception as exc:
+        logger.error("Failed to initialize LLMClient: %s", exc)
+        raise
 
     state.embedder = embedder
     state.vector_store = store

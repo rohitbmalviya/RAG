@@ -241,4 +241,117 @@ def get_settings(config_path: Optional[str] = None) -> Settings:
     import logging as _logging
     level_name = (settings.logging.level or "INFO").upper()
     logger.setLevel(getattr(_logging, level_name, _logging.INFO))
+
+    
+    try:
+        _log_missing_settings(settings)
+    except Exception as _exc:
+        logger.warning("Settings validation logging failed: %s", _exc)
     return settings
+
+
+def _log_missing_settings(settings: Settings) -> None:
+    """Log warnings for missing or suspicious configuration values.
+
+    This does not raise; it only surfaces potential misconfigurations.
+    """
+    try:
+        db = settings.database
+        missing_db: List[str] = []
+        for key in ("host", "port", "name", "user", "password", "table"):
+            if getattr(db, key) in (None, ""):
+                missing_db.append(key)
+        if missing_db:
+            logger.warning("Database config missing values: %s", ", ".join(sorted(missing_db)))
+        if not db.columns:
+            logger.warning("Database config 'columns' is empty; ingestion will have no fields to read")
+        if db.id_column in (None, ""):
+            logger.warning("Database config 'id_column' is not set; default string ids expected from data")
+
+        if db.embedding_columns and not set(db.embedding_columns).issubset(set(db.columns)):
+            logger.warning("Some 'embedding_columns' are not present in 'columns'; they will be ignored")
+    except Exception as exc:
+        logger.warning("Failed checking database config: %s", exc)
+
+    try:
+        ch = settings.chunking
+        if ch.chunk_size in (None, 0):
+            logger.warning("Chunking 'chunk_size' is not set or zero; retrieval quality may be impacted")
+        if ch.chunk_overlap is None:
+            logger.warning("Chunking 'chunk_overlap' is not set; defaulting behavior may cause gaps")
+        if ch.chunk_size and ch.chunk_overlap and ch.chunk_overlap >= ch.chunk_size:
+            logger.warning("Chunking 'chunk_overlap' (=%s) >= 'chunk_size' (=%s); expect repeated chunks", ch.chunk_overlap, ch.chunk_size)
+        if ch.unit not in (None, "token", "char"):
+            logger.warning("Chunking 'unit' should be 'token' or 'char', got '%s'", ch.unit)
+    except Exception as exc:
+        logger.warning("Failed checking chunking config: %s", exc)
+
+    try:
+        emb = settings.embedding
+        if not emb.provider:
+            logger.warning("Embedding 'provider' not set; default 'google' will be used")
+        if not emb.model:
+            logger.warning("Embedding 'model' not set; embedding may fail")
+        if emb.batch_size in (None, 0):
+            logger.warning("Embedding 'batch_size' is not set or zero; defaulting to 1")
+        if not emb.api_key:
+            logger.warning("Embedding 'api_key' not set; will try environment variable")
+    except Exception as exc:
+        logger.warning("Failed checking embedding config: %s", exc)
+
+    try:
+        vdb = settings.vector_db
+        if not vdb.provider:
+            logger.warning("Vector DB 'provider' not set; ensure Elasticsearch defaults are intended")
+        if not vdb.hosts:
+            logger.warning("Vector DB 'hosts' empty; client will not reach Elasticsearch")
+        if not vdb.index:
+            logger.warning("Vector DB 'index' not set; operations will fail until specified")
+        if not vdb.similarity:
+            logger.warning("Vector DB 'similarity' not set; default backend similarity will be used if any")
+        if vdb.dims in (None, 0):
+            logger.info("Vector DB 'dims' not set; will infer from embedding model on init")
+    except Exception as exc:
+        logger.warning("Failed checking vector DB config: %s", exc)
+
+    try:
+        ret = settings.retrieval
+        if ret.top_k in (None, 0):
+            logger.warning("Retrieval 'top_k' not set or zero; queries may return no results")
+        if ret.num_candidates_multiplier in (None, 0):
+            logger.warning("Retrieval 'num_candidates_multiplier' not set or zero; using top_k only")
+        if ret.filter_fields is None:
+            logger.warning("Retrieval 'filter_fields' is None; will be treated as empty list")
+    except Exception as exc:
+        logger.warning("Failed checking retrieval config: %s", exc)
+
+    try:
+        llm = settings.llm
+        if not llm.provider:
+            logger.warning("LLM 'provider' not set; default 'google' will be used")
+        if not llm.model:
+            logger.warning("LLM 'model' not set; generation may fail")
+        if llm.temperature is None:
+            logger.info("LLM 'temperature' not set; using provider default")
+        if llm.max_output_tokens is None:
+            logger.info("LLM 'max_output_tokens' not set; using provider default")
+    except Exception as exc:
+        logger.warning("Failed checking LLM config: %s", exc)
+
+    try:
+        ing = settings.ingestion
+        if ing.batch_size in (None, 0):
+            logger.warning("Ingestion 'batch_size' not set or zero; default endpoint parameter must be provided")
+    except Exception as exc:
+        logger.warning("Failed checking ingestion config: %s", exc)
+
+    try:
+        appcfg = settings.app
+        if not appcfg.name:
+            logger.info("App 'name' not set")
+        if not appcfg.host:
+            logger.info("App 'host' not set; FastAPI will use default host")
+        if not appcfg.port:
+            logger.info("App 'port' not set; FastAPI will use default port")
+    except Exception as exc:
+        logger.warning("Failed checking app config: %s", exc)

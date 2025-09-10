@@ -17,8 +17,13 @@ class ElasticsearchVectorStore:
         http_auth = None
         if config.username and config.password:
             http_auth = (config.username, config.password)
-
-        self._client = Elasticsearch(hosts=config.hosts, basic_auth=http_auth)
+        if not config.hosts:
+            self._logger.warning("Elasticsearch hosts not configured; client cannot connect")
+        try:
+            self._client = Elasticsearch(hosts=config.hosts, basic_auth=http_auth)
+        except Exception as exc:
+            self._logger.error("Failed to create Elasticsearch client: %s", exc)
+            raise
 
     def _index_exists(self, index: str) -> bool:
         exists = self._client.indices.exists(index=index)
@@ -96,7 +101,13 @@ class ElasticsearchVectorStore:
         if settings.vector_db.index_settings:
             mapping["settings"] = settings.vector_db.index_settings
 
-        self._client.indices.create(index=index, **mapping)
+        if not self._config.similarity:
+            self._logger.warning("Vector DB similarity not set; relying on backend defaults")
+        try:
+            self._client.indices.create(index=index, **mapping)
+        except Exception as exc:
+            self._logger.error("Failed to create index '%s': %s", index, exc)
+            raise
 
     def delete_index(self) -> None:
         index = self._config.index
@@ -216,6 +227,10 @@ class ElasticsearchVectorStore:
         if filter_clauses:
             es_query["query"] = {"bool": {"filter": filter_clauses}}
 
-        resp = self._client.search(index=index, body=es_query, _source=True)
+        try:
+            resp = self._client.search(index=index, body=es_query, _source=True)
+        except Exception as exc:
+            self._logger.error("Elasticsearch search request failed: %s", exc)
+            raise
         hits = resp.get("hits", {}).get("hits", [])
         return hits

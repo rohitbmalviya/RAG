@@ -54,6 +54,8 @@ class LLMClient:
         self._config = config
         provider = (config.provider or "google").lower()
         self._provider = provider
+        if not config.model:
+            self._logger.warning("LLM model is not set; generation may fail")
         if provider == "google":
             if api_key:
                 genai.configure(api_key=api_key)
@@ -75,22 +77,30 @@ class LLMClient:
 
     def generate(self, prompt: str) -> str:
         if self._provider == "google":
-            response = self._model.generate_content(  
-                prompt,
-                generation_config={
-                    "temperature": self._config.temperature,
-                    "max_output_tokens": self._config.max_output_tokens,
-                },
-            )
+            try:
+                response = self._model.generate_content(  
+                    prompt,
+                    generation_config={
+                        "temperature": self._config.temperature,
+                        "max_output_tokens": self._config.max_output_tokens,
+                    },
+                )
+            except Exception as exc:
+                self._logger.error("LLM Google generate_content failed: %s", exc)
+                raise
             try:
                 return response.text
             except Exception:
                 return str(response)
         
-        resp = self._client_oa.chat.completions.create(  
-            model=self._config.model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=self._config.temperature,
-            max_tokens=self._config.max_output_tokens,
-        )
+        try:
+            resp = self._client_oa.chat.completions.create(  
+                model=self._config.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=self._config.temperature,
+                max_tokens=self._config.max_output_tokens,
+            )
+        except Exception as exc:
+            self._logger.error("LLM OpenAI chat.completions.create failed: %s", exc)
+            raise
         return resp.choices[0].message.content or ""

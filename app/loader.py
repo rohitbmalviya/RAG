@@ -76,6 +76,10 @@ def load_documents(settings: Settings, batch_size: int) -> Generator[List[Docume
     logger = get_logger(__name__)
 
     db = settings.database
+    if not db.table:
+        logger.error("Database table name is missing in configuration")
+    if not db.columns:
+        logger.error("Database columns are missing in configuration")
     dsn = f"postgresql://{db.user}:{db.password}@{db.host}:{db.port}/{db.name}"
     table = db.table
     id_col = db.id_column
@@ -88,6 +92,8 @@ def load_documents(settings: Settings, batch_size: int) -> Generator[List[Docume
     sql = f"SELECT {select_cols} FROM \"{table}\""
 
     logger.info(f"Loading documents from table '{table}' with columns {cols}")
+    if id_col not in db.columns:
+        logger.warning("Configured id_column '%s' not present in database.columns; ensure it's selected", id_col)
 
     with psycopg.connect(dsn, row_factory=dict_row) as conn:
         with conn.cursor(name="server_cursor") as cur:
@@ -107,6 +113,8 @@ def load_documents(settings: Settings, batch_size: int) -> Generator[List[Docume
                     metadata = {"table": table, "id": row_id}
                     for c in cols:
                         metadata[c] = row.get(c)
+                        if c not in row:
+                            logger.warning("Row %s missing expected column '%s'", row_id, c)
 
             
                     text = _compose_text(row, embed_cols)

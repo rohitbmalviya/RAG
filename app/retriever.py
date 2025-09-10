@@ -17,8 +17,12 @@ class Retriever:
         self._logger = get_logger(__name__)
 
     def retrieve(self, query: str, filters: Optional[Dict[str, Any]] = None, top_k: Optional[int] = None) -> List[RetrievedChunk]:
-        k = top_k if top_k is not None else self._config.top_k
-        num_candidates = k * max(1, self._config.num_candidates_multiplier)
+        if top_k is None and (self._config.top_k in (None, 0)):
+            self._logger.warning("Retrieval top_k not provided and config.top_k is missing/zero; defaulting to 5")
+        k = top_k if top_k is not None else (self._config.top_k or 5)
+        if self._config.num_candidates_multiplier in (None, 0):
+            self._logger.warning("Retrieval num_candidates_multiplier is missing/zero; using 1x top_k")
+        num_candidates = k * max(1, self._config.num_candidates_multiplier or 1)
         query_vec = self._embedder.embed_texts([query], task_type="retrieval_query")[0]
 
         validated_filters: Optional[Dict[str, Any]] = None

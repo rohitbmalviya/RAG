@@ -25,6 +25,8 @@ class EmbeddingClient:
         self._provider = (config.provider or "google").lower()
         self._client_gg = None
         self._client_oa = None
+        if not config.model:
+            self._logger.warning("Embedding model is not set; API calls may fail")
         if self._provider == "google":
             if config.api_key:
                 genai.configure(api_key=config.api_key)
@@ -50,12 +52,20 @@ class EmbeddingClient:
             kwargs = {"model": self._config.model, "content": text}
             if task_type:
                 kwargs["task_type"] = task_type
-            response = self._client_gg.embed_content(**kwargs)  
+            try:
+                response = self._client_gg.embed_content(**kwargs)  
+            except Exception as exc:
+                self._logger.error("Google embed_content failed: %s", exc)
+                raise
             vector = response["embedding"] if isinstance(response, dict) else response.embedding
             return list(vector)
         
         assert self._client_oa is not None
-        resp = self._client_oa.embeddings.create(model=self._config.model, input=text)  
+        try:
+            resp = self._client_oa.embeddings.create(model=self._config.model, input=text)  
+        except Exception as exc:
+            self._logger.error("OpenAI embeddings.create failed: %s", exc)
+            raise
         vec = resp.data[0].embedding
         return list(vec)
 
@@ -70,6 +80,9 @@ class EmbeddingClient:
                     vector = self._embed_single(text, task_type=task_type)
                 except RetryError as exc:
                     self._logger.error("Failed to embed text after retries: %s", exc)
+                    raise
+                except Exception as exc:
+                    self._logger.error("Failed to embed text: %s", exc)
                     raise
                 embeddings.append(vector)
         return embeddings

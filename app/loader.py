@@ -1,15 +1,11 @@
 from __future__ import annotations
-
 import json
-from typing import Dict, Generator, List, Optional
-
+from typing import Dict, Generator, List, Optional, Iterable
 import psycopg
 from psycopg.rows import dict_row
-
 from .config import Settings
 from .models import Document
 from .utils import get_logger
-
 
 def _stringify_value(raw: Optional[object]) -> str:
     """
@@ -41,7 +37,6 @@ def _stringify_value(raw: Optional[object]) -> str:
     except Exception:
         return str(raw)
 
-
 def _compose_text(row: Dict[str, object], columns: List[str]) -> str:
     """
     Dynamically compose a text representation of a row based on configured columns.
@@ -52,20 +47,61 @@ def _compose_text(row: Dict[str, object], columns: List[str]) -> str:
         value = row.get(col)
         if value is None:
             continue
-
-
         if isinstance(value, (dict, list)):
             value = _stringify_value(value)
 
         value_str = str(value).strip()
         if not value_str:
             continue
-
-
         segments.append(f"{col.replace('_', ' ').title()}: {value_str}")
-
     return "\n".join(segments)
 
+def _yield_in_batches(items: Iterable[Document], batch_size: int) -> Generator[List[Document], None, None]:
+    batch: List[Document] = []
+    for item in items:
+        batch.append(item)
+        if len(batch) >= batch_size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
+
+def _load_documents_from_csv(path: str, settings: Settings) -> Iterable[Document]:
+    import csv
+    logger = get_logger(__name__)
+    cols = [c for c in settings.database.columns if c != settings.database.id_column]
+    embed_cols = [c for c in (settings.database.embedding_columns or cols) if c in cols]
+    with open(path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            row_id = str(row.get(settings.database.id_column) or row.get("id") or "")
+            metadata: Dict[str, object] = {"table": settings.database.table or "file", "id": row_id}
+            for c in cols:
+                metadata[c] = row.get(c)
+            text = _compose_text(row, embed_cols)
+            yield Document(id=row_id, text=text, metadata=metadata)
+
+def _load_documents_from_jsonl(path: str, settings: Settings) -> Iterable[Document]:
+    logger = get_logger(__name__)
+    cols = [c for c in settings.database.columns if c != settings.database.id_column]
+    embed_cols = [c for c in (settings.database.embedding_columns or cols) if c in cols]
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            data = json.loads(line)
+            row_id = str(data.get(settings.database.id_column) or data.get("id") or "")
+            metadata: Dict[str, object] = {"table": settings.database.table or "file", "id": row_id}
+            for c in cols:
+                metadata[c] = data.get(c)
+            text = _compose_text(data, embed_cols)
+            yield Document(id=row_id, text=text, metadata=metadata)
+
+def _load_documents_from_txt(path: str, settings: Settings) -> Iterable[Document]:
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+    meta: Dict[str, object] = {"table": settings.database.table or "file", "id": "0"}
+    yield Document(id="0", text=text, metadata=meta)
 
 def load_documents(settings: Settings, batch_size: int) -> Generator[List[Document], None, None]:
     """
@@ -74,13 +110,11 @@ def load_documents(settings: Settings, batch_size: int) -> Generator[List[Docume
     - Generates Documents with both text (for embedding) and metadata (for filters)
     """
     logger = get_logger(__name__)
-
     db = settings.database
     if not db.table:
         logger.error("Database table name is missing in configuration")
     if not db.columns:
         logger.error("Database columns are missing in configuration")
-    dsn = f"postgresql://{db.user}:{db.password}@{db.host}:{db.port}/{db.name}"
     table = db.table
     id_col = db.id_column
     cols = [c for c in db.columns if c != id_col]
@@ -88,37 +122,45 @@ def load_documents(settings: Settings, batch_size: int) -> Generator[List[Docume
     quoted_id_col = f'"{id_col}"'
     quoted_cols = [f'"{c}"' for c in cols]
     select_cols = ", ".join([quoted_id_col] + quoted_cols)
+    source_type = (settings.ingestion.source_type or "sql").lower()
+    source_path = settings.ingestion.source_path
+    if source_type == "sql":
+        if not all([db.user, db.password, db.host, db.port, db.name]):
+            logger.error("Database connection details are incomplete for SQL ingestion")
+        dsn = f"postgresql://{db.user}:{db.password}@{db.host}:{db.port}/{db.name}"
+        sql = f"SELECT {select_cols} FROM \"{table}\""
+        logger.info(f"Loading documents from table '{table}' with columns {cols}")
+        if id_col not in db.columns:
+            logger.warning("Configured id_column '%s' not present in database.columns; ensure it's selected", id_col)
+        with psycopg.connect(dsn, row_factory=dict_row) as conn:
+            with conn.cursor(name="server_cursor") as cur:
+                cur.itersize = batch_size
+                cur.execute(sql)
+                while True:
+                    rows: List[Dict[str, object]] = cur.fetchmany(batch_size)
+                    if not rows:
+                        break
+                    documents: List[Document] = []
+                    for row in rows:
+                        row_id = str(row[id_col])
+                        metadata = {"table": table, "id": row_id}
+                        for c in cols:
+                            metadata[c] = row.get(c)
+                            if c not in row:
+                                logger.warning("Row %s missing expected column '%s'", row_id, c)
 
-    sql = f"SELECT {select_cols} FROM \"{table}\""
+                        text = _compose_text(row, embed_cols)
+                        documents.append(Document(id=row_id, text=text, metadata=metadata))
+                    yield documents
+        return
 
-    logger.info(f"Loading documents from table '{table}' with columns {cols}")
-    if id_col not in db.columns:
-        logger.warning("Configured id_column '%s' not present in database.columns; ensure it's selected", id_col)
-
-    with psycopg.connect(dsn, row_factory=dict_row) as conn:
-        with conn.cursor(name="server_cursor") as cur:
-            cur.itersize = batch_size
-            cur.execute(sql)
-
-            while True:
-                rows: List[Dict[str, object]] = cur.fetchmany(batch_size)
-                if not rows:
-                    break
-
-                documents: List[Document] = []
-                for row in rows:
-                    row_id = str(row[id_col])
-
-            
-                    metadata = {"table": table, "id": row_id}
-                    for c in cols:
-                        metadata[c] = row.get(c)
-                        if c not in row:
-                            logger.warning("Row %s missing expected column '%s'", row_id, c)
-
-            
-                    text = _compose_text(row, embed_cols)
-
-                    documents.append(Document(id=row_id, text=text, metadata=metadata))
-
-                yield documents
+    if source_type == "csv" and source_path:
+        yield from _yield_in_batches(_load_documents_from_csv(source_path, settings), batch_size)
+        return
+    if source_type in {"jsonl", "jsonlines"} and source_path:
+        yield from _yield_in_batches(_load_documents_from_jsonl(source_path, settings), batch_size)
+        return
+    if source_type == "txt" and source_path:
+        yield from _yield_in_batches(_load_documents_from_txt(source_path, settings), batch_size)
+        return
+    logger.error("Unsupported ingestion source_type='%s' or missing source_path", source_type)

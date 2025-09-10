@@ -1,16 +1,12 @@
 from __future__ import annotations
-
 from typing import Any, Dict, List, Optional
-
 from .config import RetrievalConfig
-from .embedding import EmbeddingClient
 from .models import RetrievedChunk
-from .vector_db import ElasticsearchVectorStore
+from .core.base import BaseEmbedder, BaseVectorStore
 from .utils import get_logger
 
-
 class Retriever:
-    def __init__(self, embedder: EmbeddingClient, store: ElasticsearchVectorStore, config: RetrievalConfig) -> None:
+    def __init__(self, embedder: BaseEmbedder, store: BaseVectorStore, config: RetrievalConfig) -> None:
         self._embedder = embedder
         self._store = store
         self._config = config
@@ -23,8 +19,7 @@ class Retriever:
         if self._config.num_candidates_multiplier in (None, 0):
             self._logger.warning("Retrieval num_candidates_multiplier is missing/zero; using 1x top_k")
         num_candidates = k * max(1, self._config.num_candidates_multiplier or 1)
-        query_vec = self._embedder.embed_texts([query], task_type="retrieval_query")[0]
-
+        query_vec = self._embedder.embed([query], task_type="retrieval_query")[0]
         validated_filters: Optional[Dict[str, Any]] = None
         if filters:
             allowed = set(self._config.filter_fields or [])
@@ -34,11 +29,10 @@ class Retriever:
                     validated_filters[key] = value
                 else:
                     self._logger.warning("Ignoring invalid filter key '%s'. Allowed: %s", key, sorted(list(allowed)))
-
         try:
             hits = self._store.search(query_vec, top_k=k, num_candidates=num_candidates, filters=validated_filters)
         except Exception as exc:
-            self._logger.error("Elasticsearch search failed: %s", exc)
+            self._logger.error("Vector store search failed: %s", exc)
             raise
         chunks: List[RetrievedChunk] = []
         raw_scores: List[float] = [float(h.get("_score", 0.0)) for h in hits]

@@ -1,19 +1,14 @@
 from __future__ import annotations
-
 import os
 import re
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
-
 import yaml
 from pydantic import BaseModel, Field
-
 from .utils import get_logger
 
 logger = get_logger(__name__)
-
 _ENV_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)(?::-(.*?))?\}")
-
 
 def _expand_env_placeholders(text: str) -> str:
     def repl(match: re.Match[str]) -> str:
@@ -23,7 +18,6 @@ def _expand_env_placeholders(text: str) -> str:
         return val
 
     return _ENV_PATTERN.sub(repl, text)
-
 
 def _try_load_dotenv() -> None:
     """Load a .env file from project root if python-dotenv is available."""
@@ -36,10 +30,8 @@ def _try_load_dotenv() -> None:
             load_dotenv(env_path)
         else:
             load_dotenv()
-    except Exception:
-        
+    except Exception:    
         pass
-
 
 def _coerce_value(target_example: Any, value_str: str) -> Any:
     """Coerce ENV value string to match existing config type when possible."""
@@ -70,10 +62,8 @@ def _coerce_value(target_example: Any, value_str: str) -> Any:
         pass
     return value_str
 
-
 def _apply_nested_env_overrides(cfg: Dict[str, Any]) -> None:
     """Override YAML config with ENV vars using double-underscore path keys.
-
     Example: APP__HOST=127.0.0.1 -> cfg["app"]["host"]
     """
     for env_key, env_value in os.environ.items():
@@ -93,7 +83,6 @@ def _apply_nested_env_overrides(cfg: Dict[str, Any]) -> None:
             example = node.get(last_key)
             node[last_key] = _coerce_value(example, env_value)
 
-
 class DatabaseConfig(BaseModel):
     driver: Optional[str] = None
     host: Optional[str] = None
@@ -104,25 +93,19 @@ class DatabaseConfig(BaseModel):
     table: str
     id_column: Optional[str] = None
     columns: List[str] = Field(default_factory=list)
-    
     embedding_columns: List[str] = Field(default_factory=list)
-    
-    
     field_types: Dict[str, str] = Field(default_factory=dict)
-
 
 class ChunkingConfig(BaseModel):
     chunk_size: Optional[int] = None
     chunk_overlap: Optional[int] = None
     unit: Optional[str] = None  
 
-
 class EmbeddingConfig(BaseModel):
     provider: Optional[str] = None
     model: Optional[str] = None
     api_key: Optional[str] = None
     batch_size: Optional[int] = None
-
 
 class VectorDBConfig(BaseModel):
     provider: Optional[str] = None
@@ -135,13 +118,11 @@ class VectorDBConfig(BaseModel):
     dims: Optional[int] = None
     index_settings: Optional[Dict[str, Any]] = None
 
-
 class RetrievalConfig(BaseModel):
     top_k: Optional[int] = None
     num_candidates_multiplier: Optional[int] = None
     filter_fields: List[str] = Field(default_factory=list)
     reranker: Optional[Dict[str, Any]] = None  
-
 
 class LLMConfig(BaseModel):
     provider: Optional[str] = None
@@ -149,10 +130,10 @@ class LLMConfig(BaseModel):
     temperature: Optional[float] = None
     max_output_tokens: Optional[int] = None
 
-
 class IngestionConfig(BaseModel):
     batch_size: Optional[int] = None
-
+    source_type: Optional[str] = None  
+    source_path: Optional[str] = None  
 
 class AppConfig(BaseModel):
     name: Optional[str] = None
@@ -160,10 +141,8 @@ class AppConfig(BaseModel):
     port: Optional[int] = None
     eager_init: Optional[bool] = None
 
-
 class LoggingConfig(BaseModel):
     level: Optional[str] = None
-
 
 class Settings(BaseModel):
     app: AppConfig = Field(default_factory=AppConfig)
@@ -184,13 +163,9 @@ def load_yaml_config(path: str) -> Dict[str, Any]:
     data = yaml.safe_load(expanded) or {}
     return data
 
-
 @lru_cache(maxsize=1)
 def get_settings(config_path: Optional[str] = None) -> Settings:
-    
-    _try_load_dotenv()
-
-    
+    _try_load_dotenv()    
     if not config_path:
         env_cfg = os.getenv("CONFIG_FILE") or os.getenv("CONFIG_PATH")
         if env_cfg and os.path.exists(env_cfg):
@@ -202,15 +177,11 @@ def get_settings(config_path: Optional[str] = None) -> Settings:
         candidate = os.path.join(project_root, "config.yaml")
         if os.path.exists(candidate):
             config_path = candidate
-
     cfg = load_yaml_config(config_path)
-
-    
     db_url = os.getenv("DATABASE_URL") or os.getenv("DB_URL")
     if db_url:
         try:
             import urllib.parse as _url
-
             parsed = _url.urlparse(db_url)
             user = parsed.username or ""
             password = parsed.password or ""
@@ -226,23 +197,14 @@ def get_settings(config_path: Optional[str] = None) -> Settings:
                 "password": password,
             })
         except Exception as exc:
-            logger.warning("Failed to parse DATABASE_URL: %s", exc)
-
-    
+            logger.warning("Failed to parse DATABASE_URL: %s", exc)    
     _apply_nested_env_overrides(cfg)
-
     settings = Settings(**cfg)
-
-    
     if not settings.embedding.api_key:
         settings.embedding.api_key = os.getenv("LLM_MODEL_API_KEY")
-
-    
     import logging as _logging
     level_name = (settings.logging.level or "INFO").upper()
-    logger.setLevel(getattr(_logging, level_name, _logging.INFO))
-
-    
+    logger.setLevel(getattr(_logging, level_name, _logging.INFO))    
     try:
         _log_missing_settings(settings)
     except Exception as _exc:
@@ -252,7 +214,6 @@ def get_settings(config_path: Optional[str] = None) -> Settings:
 
 def _log_missing_settings(settings: Settings) -> None:
     """Log warnings for missing or suspicious configuration values.
-
     This does not raise; it only surfaces potential misconfigurations.
     """
     try:

@@ -19,7 +19,7 @@ class EmbeddingClient:
         
         if not config.api_key:
             import os as _os
-            config.api_key = _os.getenv("GOOGLE_API_KEY")
+            config.api_key = _os.getenv("LLM_MODEL_API_KEY")
         self._logger = get_logger(__name__)
 
         self._provider = (config.provider or "google").lower()

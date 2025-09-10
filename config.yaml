@@ -17,6 +17,7 @@ database:
   table: properties
   id_column: id
   columns:
+    - id
     # ✅ Embedding fields
     - property_title
     - property_description
@@ -79,8 +80,8 @@ chunking:
 
 embedding:
   provider: google
-  model: ${GOOGLE_GEMINI_EMBED_MODEL}
-  api_key: ${GOOGLE_API_KEY}
+  model: ${LLM_EMBED_MODEL}
+  api_key: ${LLM_MODEL_API_KEY}
   batch_size: 64
 
 vector_db:
@@ -120,7 +121,7 @@ retrieval:
 
 llm:
   provider: google
-  model: ${GOOGLE_GEMINI_MODEL}
+  model: ${LLM_MODEL_MODEL}
   temperature: 0.2
   max_output_tokens: 1024
 

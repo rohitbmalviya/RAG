@@ -235,7 +235,7 @@ def get_settings(config_path: Optional[str] = None) -> Settings:
 
     
     if not settings.embedding.api_key:
-        settings.embedding.api_key = os.getenv("GOOGLE_API_KEY")
+        settings.embedding.api_key = os.getenv("LLM_MODEL_API_KEY")
 
     
     import logging as _logging

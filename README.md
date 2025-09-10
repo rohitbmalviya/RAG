@@ -7,11 +7,11 @@ A config-driven, generic Retrieval-Augmented Generation (RAG) FastAPI service fo
 - Config-driven pipeline via `config.yaml`
 - Load from PostgreSQL table (default: `properties`)
 - Chunking with overlap; configurable unit (`token` or `char`) and offsets preserved
-- Embeddings with `gemini-embedding-001` with retry/backoff and batching
+- Embeddings with `your_embed_model_name` with retry/backoff and batching
 - Vector store in Elasticsearch with kNN search (`dense_vector`), configurable dims and index
 - Retrieval with optional metadata filters and configurable `top_k`
 - Prompt construction that cites sources
-- LLM answers with `gemini-2.5-flash-lite`
+- LLM answers with `your_model_name`
 - FastAPI endpoints: `/ingest`, `/query`, `/health`
 - Modular design, extendable to multiple tables/sources
 
@@ -20,7 +20,7 @@ A config-driven, generic Retrieval-Augmented Generation (RAG) FastAPI service fo
 - Python 3.11+
 - PostgreSQL 14+
 - Elasticsearch 8.13+
-- Google API key (`GOOGLE_API_KEY`)
+- Google API key (`LLM_MODEL_API_KEY`)
 
 ## Install
 
@@ -37,7 +37,7 @@ Edit `config.yaml` or set environment variables referenced in it. Key items:
 - Database connection `DATABASE_URL`
 - `database.table` and `database.columns`
 - `chunking.unit` (`token` or `char`), `chunk_size`, `chunk_overlap`
-- `embedding.model` and `GOOGLE_API_KEY`
+- `embedding.model` and `LLM_MODEL_API_KEY`
 - Elasticsearch `ELASTIC_HOST`, `ELASTIC_USERNAME`, `ELASTIC_PASSWORD`, `vector_db.index`, `vector_db.dims`
 - Retrieval `top_k`
 
@@ -46,7 +46,7 @@ Edit `config.yaml` or set environment variables referenced in it. Key items:
 Create a `.env` file (or copy from `.env.example` if present):
 
 ```bash
-GOOGLE_API_KEY=your_google_api_key
+LLM_MODEL_API_KEY=your_google_api_key
 DB_URL=postgresql://postgres:postgres@localhost:5432/leasebnb
 ELASTIC_HOST=http://localhost:9200
 ELASTIC_USERNAME=elastic
@@ -70,9 +70,9 @@ Create a `.env` file in the project root with the following content:
 
 ```bash
 # Google API Configuration
-GOOGLE_API_KEY=your_google_api_key_here
-GOOGLE_GEMINI_EMBED_MODEL=gemini-embedding-001
-GOOGLE_GEMINI_MODEL=gemini-2.5-flash-lite
+LLM_MODEL_API_KEY=your_google_api_key_here
+LLM_EMBED_MODEL=your_embed_model_name
+LLM_MODEL_MODEL=your_model_name
 
 # Database Configuration
 DB_URL=postgresql://postgres:postgres@localhost:5432/leasebnb

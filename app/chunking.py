@@ -1,19 +1,13 @@
 from __future__ import annotations
-
 from typing import Iterable, List
-
 from .utils import get_logger
-
 from .models import Document
-
 
 def _split_text_to_tokens(text: str) -> List[str]:
     return text.split()
 
-
 def _join_tokens(tokens: List[str]) -> str:
     return " ".join(tokens)
-
 
 def chunk_documents(
     documents: Iterable[Document],

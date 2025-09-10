@@ -34,7 +34,7 @@ pip install -r requirements.txt
 
 Edit `config.yaml` or set environment variables referenced in it. Key items:
 
-- Database connection via `DB_URL` (or legacy `DATABASE_URL`) or individual `DB_*` vars
+- Database connection `DATABASE_URL`
 - `database.table` and `database.columns`
 - `chunking.unit` (`token` or `char`), `chunk_size`, `chunk_overlap`
 - `embedding.model` and `GOOGLE_API_KEY`
@@ -48,37 +48,83 @@ Create a `.env` file (or copy from `.env.example` if present):
 ```bash
 GOOGLE_API_KEY=your_google_api_key
 DB_URL=postgresql://postgres:postgres@localhost:5432/leasebnb
-# or set DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD individually
 ELASTIC_HOST=http://localhost:9200
 ELASTIC_USERNAME=elastic
 ELASTIC_PASSWORD=changeme
 ```
 
-## Run
+## Start the Application
+
+### Prerequisites
+
+1. Ensure PostgreSQL is running and accessible
+2. Ensure Elasticsearch is running and accessible
+3. Set up your environment variables (see Configure section above)
+4. Install dependencies: `pip install -r requirements.txt`
+
+### Step-by-Step Local Setup
+
+#### 1. Create Environment File
+
+Create a `.env` file in the project root with the following content:
+
+```bash
+# Google API Configuration
+GOOGLE_API_KEY=your_google_api_key_here
+GOOGLE_GEMINI_EMBED_MODEL=gemini-embedding-001
+GOOGLE_GEMINI_MODEL=gemini-2.5-flash-lite
+
+# Database Configuration
+DB_URL=postgresql://postgres:postgres@localhost:5432/leasebnb
+# Alternative: Individual DB settings
+DB_HOST=localhost
+DB_PORT=5432
+DB_NAME=leasebnb
+DB_USER=postgres
+DB_PASSWORD=postgres
+
+# Elasticsearch Configuration
+ELASTIC_HOST=http://localhost:9200
+ELASTIC_USERNAME=elastic
+ELASTIC_PASSWORD=DkIedPPSCb
+```
+
+**Important:** Replace `your_google_api_key_here` with your actual Google API key.
+
+#### 2. Install Dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+#### 3. Start Required Services
+
+**Option A: Using Docker Compose (Recommended)**
+
+```bash
+docker-compose up -d
+```
+
+**Option B: Manual Setup**
+
+- Start PostgreSQL on localhost:5432
+- Start Elasticsearch on localhost:9200
+
+#### 4. Start the Application
 
 ```bash
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-Visit `http://localhost:8000/docs`.
+The application will start on `http://localhost:8000`. Visit `http://localhost:8000/docs` to access the interactive API documentation.
 
-## Ingest
+### Testing the Application
 
-Rebuild index and ingest (runs in background):
+Once running, you can test the endpoints:
 
-```bash
-curl -X POST http://localhost:8000/ingest \
-  -H 'Content-Type: application/json' \
-  -d '{"rebuild_index": true, "batch_size": 500}'
-```
-
-## Query
-
-```bash
-curl -X POST http://localhost:8000/query \
-  -H 'Content-Type: application/json' \
-  -d '{"query": "2-bedroom in Dubai Marina with gym", "filters": {"city": "Dubai"}, "top_k": 5}'
-```
+- **Health Check**: `curl http://localhost:8000/health`
+- **Ingest Data**: `curl -X POST http://localhost:8000/ingest -H 'Content-Type: application/json' -d '{"rebuild_index": true}'`
+- **Query Data**: `curl -X POST http://localhost:8000/query -H 'Content-Type: application/json' -d '{"query": "2-bedroom apartment in Dubai"}'`
 
 ## Notes
 

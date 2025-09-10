@@ -104,14 +104,17 @@ def _run_ingestion(batch_size: int, rebuild_index: bool) -> None:
     if not (state.settings and state.embedder and state.vector_store):
         raise RuntimeError("Components not initialized")
     settings = state.settings
-    if rebuild_index:
-        try:
-            dims = state.vector_store._config.dims if state.vector_store and state.vector_store._config.dims else state.embedder.get_dimension()  # type: ignore[arg-type]
-            state.vector_store.ensure_index(int(dims))  # type: ignore[arg-type]
-            state.index_ready = True
-        except Exception as exc:
-            logger.error("Failed to prepare index: %s", exc)
-            raise
+    # Rebuild index if requested
+    try:
+        dims = state.vector_store._config.dims if state.vector_store and state.vector_store._config.dims else state.embedder.get_dimension()  # type: ignore[arg-type]
+        if rebuild_index:
+            logger.info("Rebuilding index '%s'", state.vector_store._config.index)
+            state.vector_store.delete_index()
+        state.vector_store.ensure_index(int(dims))  # type: ignore[arg-type]
+        state.index_ready = True
+    except Exception as exc:
+        logger.error("Failed to prepare index: %s", exc)
+        raise
 
     total_rows = 0
     total_chunks = 0

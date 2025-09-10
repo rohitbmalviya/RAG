@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Dict, Generator, Iterable, List, Optional
+from typing import Dict, Generator, List, Optional
 
 import psycopg
 from psycopg.rows import dict_row
@@ -11,7 +11,11 @@ from .models import Document
 from .utils import get_logger
 
 
-def _stringify_amenities(raw: Optional[object]) -> str:
+def _stringify_value(raw: Optional[object]) -> str:
+    """
+    Converts complex JSON/array/dict fields into a string representation.
+    Useful for amenities-like fields.
+    """
     if raw is None:
         return ""
     try:
@@ -19,89 +23,94 @@ def _stringify_amenities(raw: Optional[object]) -> str:
             data = json.loads(raw)
         else:
             data = raw
+
         if isinstance(data, dict):
             parts = []
             for key, value in data.items():
                 if isinstance(value, list):
-                    items = ", ".join([str(v) for v in value])
+                    items = ", ".join(map(str, value))
                     parts.append(f"{key}: {items}")
                 else:
                     parts.append(f"{key}: {value}")
             return "; ".join(parts)
+
         if isinstance(data, list):
-            return ", ".join([str(v) for v in data])
+            return ", ".join(map(str, data))
+
         return str(data)
     except Exception:
         return str(raw)
 
 
-def _compose_text(row: Dict[str, object], table: str) -> str:
-    title = str(row.get("property_title") or "").strip()
-    description = str(row.get("property_description") or "").strip()
-    emirate = str(row.get("emirate") or "").strip()
-    city = str(row.get("city") or "").strip()
-    district = str(row.get("district") or "").strip()
-    property_type_id = str(row.get("property_type_id") or "").strip()
-    rent_charge = str(row.get("rent_charge") or "").strip()
-    lease_duration = str(row.get("lease_duration") or "").strip()
-    amenities = _stringify_amenities(row.get("amenities"))
-
+def _compose_text(row: Dict[str, object], columns: List[str]) -> str:
+    """
+    Dynamically compose a text representation of a row based on configured columns.
+    Instead of hardcoding, it uses whatever columns are listed in config.yml.
+    """
     segments: List[str] = []
-    if title:
-        segments.append(f"Title: {title}")
-    if description:
-        segments.append(f"Description: {description}")
-    loc_parts = [p for p in [emirate, city, district] if p]
-    if loc_parts:
-        segments.append(f"Location: {', '.join(loc_parts)}")
-    type_parts = []
-    if property_type_id:
-        type_parts.append(f"TypeId: {property_type_id}")
-    if rent_charge:
-        type_parts.append(f"Rent: {rent_charge}")
-    if lease_duration:
-        type_parts.append(f"Lease: {lease_duration}")
-    if type_parts:
-        segments.append(" | ".join(type_parts))
-    if amenities:
-        segments.append(f"Amenities: {amenities}")
+    for col in columns:
+        value = row.get(col)
+        if value is None:
+            continue
+
+        # Handle JSON/amenities-style fields nicely
+        if isinstance(value, (dict, list)):
+            value = _stringify_value(value)
+
+        value_str = str(value).strip()
+        if not value_str:
+            continue
+
+        # Make text more readable (capitalize field names)
+        segments.append(f"{col.replace('_', ' ').title()}: {value_str}")
 
     return "\n".join(segments)
 
 
 def load_documents(settings: Settings, batch_size: int) -> Generator[List[Document], None, None]:
+    """
+    Loads documents from the configured table and columns.
+    - Uses settings.database.table and settings.database.columns
+    - Generates Documents with both text (for embedding) and metadata (for filters)
+    """
     logger = get_logger(__name__)
 
     db = settings.database
-    dsn = (
-        f"postgresql://{db.user}:{db.password}@{db.host}:{db.port}/{db.name}"
-    )
+    dsn = f"postgresql://{db.user}:{db.password}@{db.host}:{db.port}/{db.name}"
     table = db.table
     id_col = db.id_column
     cols = [c for c in db.columns if c != id_col]
-    select_cols = ", ".join([id_col] + cols)
+    # Quote identifiers to preserve camelCase and special names
+    quoted_id_col = f'"{id_col}"'
+    quoted_cols = [f'"{c}"' for c in cols]
+    select_cols = ", ".join([quoted_id_col] + quoted_cols)
 
-    sql = f"SELECT {select_cols} FROM {table}"
+    sql = f"SELECT {select_cols} FROM \"{table}\""
+
+    logger.info(f"Loading documents from table '{table}' with columns {cols}")
 
     with psycopg.connect(dsn, row_factory=dict_row) as conn:
         with conn.cursor(name="server_cursor") as cur:
             cur.itersize = batch_size
             cur.execute(sql)
+
             while True:
                 rows: List[Dict[str, object]] = cur.fetchmany(batch_size)
                 if not rows:
                     break
+
                 documents: List[Document] = []
                 for row in rows:
                     row_id = str(row[id_col])
-                    metadata = {
-                        "table": table,
-                        "id": row_id,
-                    }
+
+                    # metadata = full row
+                    metadata = {"table": table, "id": row_id}
                     for c in cols:
                         metadata[c] = row.get(c)
-                    text = _compose_text(row, table)
-                    documents.append(
-                        Document(id=row_id, text=text, metadata=metadata)
-                    )
+
+                    # text = composed embedding string
+                    text = _compose_text(row, cols)
+
+                    documents.append(Document(id=row_id, text=text, metadata=metadata))
+
                 yield documents

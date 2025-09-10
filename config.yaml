@@ -3,8 +3,10 @@ app:
   host: 0.0.0.0
   port: 8000
   eager_init: false
+
 logging:
   level: INFO
+
 database:
   driver: postgres
   # Prefer DB_URL in .env. These fields are fallbacks and will be overridden by DB_URL when set.
@@ -16,12 +18,29 @@ database:
   table: properties
   id_column: id
   columns:
+    # ✅ Embedding fields
     - property_title
     - property_description
+    - nearby_landmarks
+    - building_name
+
+    # ✅ Filter fields (structured search)
     - emirate
     - city
     - district
+    - community
+    - subcommunity
+    - property_type_id
+    - rent_type_id
+    - furnishing_status
+    - number_of_bedrooms
+    - number_of_bathrooms
+    - property_size
     - rent_charge
+    - bnb_verification_status
+    - premiumBoostingStatus
+    - carouselBoostingStatus
+    - property_status
 
 chunking:
   chunk_size: 500
@@ -30,7 +49,7 @@ chunking:
 
 embedding:
   provider: google
-  model: gemini-embedding-001
+  model: ${GOOGLE_GEMINI_EMBED_MODEL}
   api_key: ${GOOGLE_API_KEY}
   batch_size: 64
 
@@ -43,19 +62,34 @@ vector_db:
   index: rag_properties
   similarity: cosine
   refresh_on_write: false
-  dims: null # set to an integer to skip probing embedding dimension
+  dims: 3072
 
 retrieval:
-  top_k: 5
-  num_candidates_multiplier: 8
+  top_k: 8
+  num_candidates_multiplier: 20
   filter_fields:
-    - city
     - emirate
+    - city
+    - district
+    - community
+    - subcommunity
     - property_type_id
+    - rent_type_id
+    - furnishing_status
+    - number_of_bedrooms
+    - number_of_bathrooms
+    - rent_charge_min
+    - rent_charge_max
+    - property_size_min
+    - property_size_max
+    - bnb_verification_status
+    - premiumBoostingStatus
+    - carouselBoostingStatus
+    - property_status
 
 llm:
   provider: google
-  model: gemini-2.5-flash-lite
+  model: ${GOOGLE_GEMINI_MODEL}
   temperature: 0.2
   max_output_tokens: 1024
 

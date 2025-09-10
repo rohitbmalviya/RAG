@@ -21,7 +21,6 @@ class Retriever:
         num_candidates = k * max(1, self._config.num_candidates_multiplier)
         query_vec = self._embedder.embed_texts([query], task_type="retrieval_query")[0]
 
-        # Validate filters against allowed fields to avoid ES errors
         validated_filters: Optional[Dict[str, Any]] = None
         if filters:
             allowed = set(self._config.filter_fields or [])
@@ -38,8 +37,13 @@ class Retriever:
             self._logger.error("Elasticsearch search failed: %s", exc)
             raise
         chunks: List[RetrievedChunk] = []
+        raw_scores: List[float] = [float(h.get("_score", 0.0)) for h in hits]
+        max_score = max(raw_scores) if raw_scores else 1.0
+        min_score = min(raw_scores) if raw_scores else 0.0
+        denom = (max_score - min_score) if (max_score - min_score) > 0 else 1.0
         for hit in hits:
-            score = hit.get("_score", 0.0)
+            raw = float(hit.get("_score", 0.0))
+            score = (raw - min_score) / denom
             source = hit.get("_source", {})
             chunks.append(
                 RetrievedChunk(score=score, text=source.get("text", ""), metadata=source.get("metadata", {}))

@@ -9,7 +9,6 @@ logging:
 
 database:
   driver: postgres
-  # Prefer DB_URL in .env. These fields are fallbacks and will be overridden by DB_URL when set.
   host: ${DB_HOST}
   port: ${DB_PORT}
   name: ${DB_NAME}
@@ -42,6 +41,37 @@ database:
     - carouselBoostingStatus
     - property_status
 
+  # Optional: explicitly control which columns are used to compose the embedding text
+  embedding_columns:
+    - property_title
+    - property_description
+    - nearby_landmarks
+    - building_name
+
+  # Optional: explicit field type hints for dynamic ES mappings
+  # Supported: keyword, text, integer, float
+  field_types:
+    property_title: text
+    property_description: text
+    nearby_landmarks: text
+    building_name: text
+    emirate: keyword
+    city: keyword
+    district: keyword
+    community: keyword
+    subcommunity: keyword
+    property_type_id: keyword
+    rent_type_id: keyword
+    furnishing_status: keyword
+    number_of_bedrooms: integer
+    number_of_bathrooms: integer
+    property_size: float
+    rent_charge: float
+    bnb_verification_status: keyword
+    premiumBoostingStatus: keyword
+    carouselBoostingStatus: keyword
+    property_status: keyword
+
 chunking:
   chunk_size: 500
   chunk_overlap: 50
@@ -63,6 +93,7 @@ vector_db:
   similarity: cosine
   refresh_on_write: false
   dims: 3072
+  mapping_properties_key: properties
 
 retrieval:
   top_k: 8

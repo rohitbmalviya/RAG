@@ -46,7 +46,8 @@ class QueryResponse(BaseModel):
 
 class IngestRequest(BaseModel):
     rebuild_index: bool = False
-    batch_size: Optional[int] = None
+    batch_size: Optional[int] = None  
+    parallel: Optional[bool] = None
 
 
 class State:
@@ -65,6 +66,11 @@ def initialize_components() -> None:
     settings = get_settings(os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.yaml"))
     state.settings = settings
 
+    if not settings.database.columns:
+        raise RuntimeError("database.columns must be configured")
+    if settings.retrieval.filter_fields is None:
+        settings.retrieval.filter_fields = []  
+
     embedder = EmbeddingClient(settings.embedding)
     store = ElasticsearchVectorStore(settings.vector_db)
     retriever = Retriever(embedder, store, settings.retrieval)
@@ -82,8 +88,8 @@ async def on_startup() -> None:
     assert state.settings is not None
     if state.settings.app.eager_init:
         try:
-            dims = state.vector_store._config.dims if state.vector_store and state.vector_store._config.dims else state.embedder.get_dimension()  # type: ignore[arg-type]
-            state.vector_store.ensure_index(int(dims))  # type: ignore[arg-type]
+            dims = state.vector_store._config.dims if state.vector_store and state.vector_store._config.dims else state.embedder.get_dimension()  
+            state.vector_store.ensure_index(int(dims))  
             state.index_ready = True
         except Exception as exc:
             logger.warning("Failed eager index init: %s", exc)
@@ -104,13 +110,12 @@ def _run_ingestion(batch_size: int, rebuild_index: bool) -> None:
     if not (state.settings and state.embedder and state.vector_store):
         raise RuntimeError("Components not initialized")
     settings = state.settings
-    # Rebuild index if requested
     try:
-        dims = state.vector_store._config.dims if state.vector_store and state.vector_store._config.dims else state.embedder.get_dimension()  # type: ignore[arg-type]
+        dims = state.vector_store._config.dims if state.vector_store and state.vector_store._config.dims else state.embedder.get_dimension()  
         if rebuild_index:
             logger.info("Rebuilding index '%s'", state.vector_store._config.index)
             state.vector_store.delete_index()
-        state.vector_store.ensure_index(int(dims))  # type: ignore[arg-type]
+        state.vector_store.ensure_index(int(dims))  
         state.index_ready = True
     except Exception as exc:
         logger.error("Failed to prepare index: %s", exc)
@@ -119,6 +124,7 @@ def _run_ingestion(batch_size: int, rebuild_index: bool) -> None:
     total_rows = 0
     total_chunks = 0
     total_indexed = 0
+    total_errors = 0
 
     for docs_batch in load_documents(settings, batch_size=batch_size):
         logger.info("Fetched %s rows from DB", len(docs_batch))
@@ -131,7 +137,8 @@ def _run_ingestion(batch_size: int, rebuild_index: bool) -> None:
         if not chunks:
             continue
         logger.info("Created %s chunks", len(chunks))
-        embeddings = state.embedder.embed_texts([c.text for c in chunks], task_type="retrieval_document")
+        texts = [c.text for c in chunks]
+        embeddings = state.embedder.embed_texts(texts, task_type="retrieval_document")
         logger.info("Generated %s embeddings", len(embeddings))
         success, errors = state.vector_store.upsert(chunks, embeddings)
         if success > 0 and not state.index_ready:
@@ -139,8 +146,9 @@ def _run_ingestion(batch_size: int, rebuild_index: bool) -> None:
         total_rows += len(docs_batch)
         total_chunks += len(chunks)
         total_indexed += success
+        total_errors += int(errors)
         logger.info("Upserted %s chunks (errors=%s)", success, errors)
-        logger.info("Ingested totals rows=%s chunks=%s indexed=%s", total_rows, total_chunks, total_indexed)
+        logger.info("Ingested totals rows=%s chunks=%s indexed=%s errors=%s", total_rows, total_chunks, total_indexed, total_errors)
 
 
 @app.post("/ingest")

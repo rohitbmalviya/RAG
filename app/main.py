@@ -7,11 +7,12 @@ from .chunking import chunk_documents
 from .config import Settings, get_settings
 from .core.base import BaseEmbedder, BaseVectorStore, BaseLLM
 from .loader import load_documents
-from .llm import build_prompt
+from .llm import build_prompt, filter_retrieved_chunks,is_property_query
 from .models import RetrievedChunk
 from .retriever import Retriever
 from .utils import get_logger
 from .factories import build_embedder, build_llm, build_vector_store
+from fastapi.middleware.cors import CORSMiddleware
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -19,6 +20,15 @@ except Exception:
     pass
 logger = get_logger(__name__)
 app = FastAPI(title="RAG Pipeline")
+
+# Enable CORS for frontend running on localhost:3000
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 def main() -> None:
     initialize_components()
     if not (pipeline_state.embedder_client and pipeline_state.retriever_client and pipeline_state.llm_client):
@@ -33,7 +43,6 @@ def main() -> None:
 
 class QueryRequest(BaseModel):
     query: str
-    filters: Optional[Dict[str, Any]] = None
     top_k: Optional[int] = None
 
 class SourceItem(BaseModel):
@@ -115,12 +124,24 @@ async def on_startup() -> None:
 async def query_endpoint(request: QueryRequest) -> QueryResponse:
     if not (pipeline_state.retriever_client and pipeline_state.llm_client):
         raise HTTPException(status_code=500, detail="Server not initialized")
-    chunks: List[RetrievedChunk] = pipeline_state.retriever_client.retrieve(request.query, filters=request.filters, top_k=request.top_k)
-    prompt = build_prompt(request.query, chunks)
-    answer = pipeline_state.llm_client.generate(prompt)
-    sources: List[SourceItem] = [SourceItem(score=c.score, text=c.text, metadata=c.metadata) for c in chunks]
-    return QueryResponse(answer=answer, sources=sources)
+    if not request.query or not request.query.strip():
+        raise HTTPException(status_code=400, detail="Query must not be empty")
+    if is_property_query(request.query):
+        chunks: List[RetrievedChunk] = pipeline_state.retriever_client.retrieve(
+            request.query,
+            top_k=request.top_k,
+        )
+        answer = pipeline_state.llm_client.chat(request.query, retrieved_chunks=chunks)
 
+        filtered_chunks = filter_retrieved_chunks(chunks, min_score=0.7)
+        sources: List[SourceItem] = [
+            SourceItem(score=c.score, text=c.text, metadata=c.metadata)
+            for c in filtered_chunks
+        ]
+        return QueryResponse(answer=answer, sources=sources)
+    else:
+        answer = pipeline_state.llm_client.chat(request.query)
+        return QueryResponse(answer=answer, sources=[])
 
 def _run_ingestion(batch_size: int, rebuild_index: bool) -> None:
     if not (pipeline_state.settings and pipeline_state.embedder_client and pipeline_state.vector_store_client):
@@ -136,12 +157,10 @@ def _run_ingestion(batch_size: int, rebuild_index: bool) -> None:
     except Exception as exc:
         logger.error("Failed to prepare index: %s", exc)
         raise
-
     total_rows = 0
     total_chunks = 0
     total_indexed = 0
     total_errors = 0
-
     for docs_batch in load_documents(settings, batch_size=batch_size):
         logger.info("Fetched %s rows from DB", len(docs_batch))
         chunks = chunk_documents(

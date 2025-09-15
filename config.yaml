@@ -175,17 +175,16 @@ retrieval:
     - district
     - community
     - subcommunity
-    - property_type_id
-    - rent_type_id
+    - property_type_id # [Apartment,Villa,Townhouse,Penthouse,Office,Studio,Duplex ,Hotel/Serviced]
+    - rent_type_id # [Lease,Leasing - Holiday Home Ready,Management Fees]
     - furnishing_status
     - number_of_bedrooms
     - number_of_bathrooms
     - rent_charge
     - property_size
-    - bnb_verification_status
-    - premiumBoostingStatus
-    - carouselBoostingStatus
-    - property_status
+    - bnb_verification_status # (keyword verified extract the data which as status==verified)
+    - premiumBoostingStatus # (keyword premium extract the data which as status==active)
+    - carouselBoostingStatus # (keyword prime extract the data which as status==active)
 
 llm:
   provider: google

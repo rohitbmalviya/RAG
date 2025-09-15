@@ -3,6 +3,8 @@ import os
 from typing import Any, Dict, List, Optional
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from pydantic import BaseModel
+
+from .query_processor import preprocess_query
 from .chunking import chunk_documents
 from .config import Settings, get_settings
 from .core.base import BaseEmbedder, BaseVectorStore, BaseLLM
@@ -126,13 +128,15 @@ async def query_endpoint(request: QueryRequest) -> QueryResponse:
         raise HTTPException(status_code=500, detail="Server not initialized")
     if not request.query or not request.query.strip():
         raise HTTPException(status_code=400, detail="Query must not be empty")
-    if is_property_query(request.query):
+    normalized_query, filters = preprocess_query(request.query,pipeline_state.llm_client)
+    print(filters)
+    if is_property_query(normalized_query):
         chunks: List[RetrievedChunk] = pipeline_state.retriever_client.retrieve(
-            request.query,
+            normalized_query,
+            filters=filters,
             top_k=request.top_k,
         )
-        answer = pipeline_state.llm_client.chat(request.query, retrieved_chunks=chunks)
-
+        answer = pipeline_state.llm_client.chat(normalized_query, retrieved_chunks=chunks)
         filtered_chunks = filter_retrieved_chunks(chunks, min_score=0.7)
         sources: List[SourceItem] = [
             SourceItem(score=c.score, text=c.text, metadata=c.metadata)
@@ -140,7 +144,7 @@ async def query_endpoint(request: QueryRequest) -> QueryResponse:
         ]
         return QueryResponse(answer=answer, sources=sources)
     else:
-        answer = pipeline_state.llm_client.chat(request.query)
+        answer = pipeline_state.llm_client.chat(normalized_query)
         return QueryResponse(answer=answer, sources=[])
 
 def _run_ingestion(batch_size: int, rebuild_index: bool) -> None:

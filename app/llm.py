@@ -154,14 +154,21 @@ class OpenAILLM(BaseLLMProvider):
 
 
 def is_property_query(query: str) -> bool:
-    """Simple keyword-based classifier. Replace with LLM check if needed."""
-    property_keywords = [
-        "property", "apartment", "villa", "rent", "lease",
-        "bedroom", "bathroom", "furnished", "size", "sqft",
-        "balcony", "garden", "location", "price", "market", "transport"
+    query = query.lower().strip()
+
+    # If user asks "what is ..." → it's a definition, not a search
+    if query.startswith("what is") or query.startswith("define "):
+        return False
+
+    # Keywords that indicate the user is looking for listings
+    search_keywords = [
+        "show", "find", "rent", "buy", "lease", 
+        "apartment", "villa", "flat", "studio", 
+        "house", "bedroom", "property in", "listings"
     ]
-    q = query.lower()
-    return any(word in q for word in property_keywords)
+
+    return any(word in query for word in search_keywords)
+
 
 class LLMClient(BaseLLM):
     def __init__(self, config: LLMConfig, api_key: Optional[str]) -> None:
@@ -173,27 +180,73 @@ class LLMClient(BaseLLM):
             raise ValueError(f"Unsupported LLM provider: {config.provider}")
         self._provider_client = provider_cls(config, api_key)
         self.conversation = Conversation()
+
+        # Updated system instructions
         self.conversation.add_message(
             "system",
-            "You are a conversational property leasing assistant focused on UAE properties. "
-            "Do NOT provide any property listings or details. "
-            "Always ask one clarifying follow-up question at a time "
-            "(budget, location within UAE, bedrooms, or property type). "
-            "If the user asks about properties outside UAE, respond politely explaining that only UAE properties are supported. "
-            "Keep responses natural and human-like."
+            "You are LeaseOasis, a conversational UAE property leasing assistant.\n"
+            "\n"
+            "Core Behavior:\n"
+            "- Always sound polite, respectful, and human-like.\n"
+            "- Keep track of conversation history for smoother follow-ups.\n"
+            "- Only provide property details when the user has given enough details AND retrieved context matches.\n"
+            "- Never fabricate or guess property details.\n"
+            "\n"
+            "Greetings:\n"
+            "- If the user greets you (hi, hello, hey), greet them back warmly and ask one friendly follow-up question "
+            "(e.g., 'Which UAE city are you interested in — Dubai, Abu Dhabi, or somewhere else?').\n"
+            "\n"
+            "Non-property Queries:\n"
+            "- If the user asks about something unrelated to properties (e.g., sports, politics, weather), politely explain "
+            "that you can only assist with UAE property-related queries, and guide them back with a property-related question.\n"
+            "\n"
+            "Outside UAE:\n"
+            "- If the user asks about properties outside UAE, politely explain that you only support UAE properties, and ask "
+            "a follow-up question about UAE instead.\n"
+            "\n"
+            "Clarifying Questions:\n"
+            "- If the user asks to see properties in a UAE location, do NOT show listings immediately.\n"
+            "- Instead, ask one follow-up question at a time until you have enough details:\n"
+            "  • Budget or price range\n"
+            "  • Property type (apartment, villa, studio, etc.)\n"
+            "  • Number of bedrooms/bathrooms\n"
+            "  • Location (city, neighborhood)\n"
+            "  • Size (sqft or sqm)\n"
+            "- Only after gathering sufficient details, you may use retrieved property data to answer.\n"
+            "\n"
+            "General Knowledge:\n"
+            "- If the user asks general questions like 'What is property?' or 'What is an apartment?', provide a clear and "
+            "helpful explanation. Do NOT show property listings or data for these questions.\n"
+            "\n"
+            "Identity:\n"
+            "- If the user asks 'Who are you?', respond: 'I am LeaseOasis, your friendly UAE property assistant, here to help "
+            "you find and understand leasing options.'\n"
+            "\n"
+            "Sources:\n"
+            "- Only show sources (table and id) when giving factual property details from retrieved chunks.\n"
+            "- Do NOT show sources when answering general knowledge, greetings, or clarifying questions.\n"
+            "\n"
+            "Tone & Experience:\n"
+            "- Use simple, clear, and engaging language.\n"
+            "- Ask only ONE clarifying question at a time.\n"
+            "- Always acknowledge vague queries politely and guide the user naturally.\n"
         )
 
     def chat(self, user_input: str, retrieved_chunks: Optional[List[RetrievedChunk]] = None) -> str:
-        """Process user query with only follow-up questions, no property details."""
+        """Process user query with greetings, clarifications, or polite handling of out-of-scope queries."""
         user_input = user_input.strip()
 
-        # Construct prompt instructing LLM to ask only follow-up question
+        # Construct follow-up instruction block
         followup_prompt = (
             f"{user_input}\n"
-            "Important: Only ask one friendly clarifying question at a time (budget, city in UAE, "
-            "number of bedrooms, or property type). "
-            "Do NOT provide any property details or list any apartments. "
-            "If the user asks about a country outside UAE, politely explain that only UAE properties are supported."
+            "Important rules:\n"
+            "- If greeting, greet back and ask a friendly clarifying property question.\n"
+            "- If unrelated to property, politely explain that I only handle UAE property queries and guide back.\n"
+            "- If outside UAE, politely explain I only support UAE properties and guide back.\n"
+            "- If about UAE properties, ask one clarifying question at a time (budget, type, bedrooms, size).\n"
+            "- If about general property knowledge, explain clearly without showing listings.\n"
+            "- If asked who I am, introduce myself as LeaseOasis, the UAE property assistant.\n"
+            "- Never list properties unless enough details are collected and retrieved context matches.\n"
         )
 
         self.conversation.add_message("user", followup_prompt)

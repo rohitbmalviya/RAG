@@ -130,22 +130,28 @@ class VectorStoreClient(BaseVectorStore):
                 "text": doc.text,
                 "embedding": vec,
                 "metadata": doc.metadata,
-                "table": doc.metadata.get("table"),
-                "source_id": doc.metadata.get("source_id"),
-                "chunk_index": doc.metadata.get("chunk_index"),
-                "chunk_offset": doc.metadata.get("chunk_offset"),
-                "chunk_unit": doc.metadata.get("chunk_unit"),
             }
-            for col in columns + filter_fields:
-                if col in source:
+            # Add essential fields for indexing
+            essential_fields = ["table", "source_id", "chunk_index", "chunk_offset", "chunk_unit"]
+            for field in essential_fields:
+                value = doc.metadata.get(field)
+                if value is not None:
+                    source[field] = value
+            
+            # Add only the most frequently used filter fields at root level for RAG performance
+            # These are the fields you'll filter on most often in your RAG queries
+            high_frequency_filters = [
+                "emirate", "city", "property_type_id", "rent_type_id", 
+                "furnishing_status", "number_of_bedrooms", "number_of_bathrooms",
+                "property_status", "bnb_verification_status", "premiumBoostingStatus", 
+                "carouselBoostingStatus", "rent_charge", "property_size"
+            ]
+            for field in high_frequency_filters:
+                if field in source:
                     continue
-                value = doc.metadata.get(col)
-                if value is not None and col.endswith("_id"):
-                    try:
-                        value = str(value)
-                    except Exception:
-                        pass
-                source[col] = value
+                value = doc.metadata.get(field)
+                if value is not None:
+                    source[field] = value
             actions.append({"_op_type": "index", "_index": index, "_id": doc.id, "_source": source})
         try:
             success, errors = bulk(
@@ -188,20 +194,33 @@ class VectorStoreClient(BaseVectorStore):
         filter_clauses: List[Dict[str, Any]] = []
         if filters:
             allowed = set(settings.retrieval.filter_fields or [])
+            # High-frequency filter fields that are stored at root level for performance
+            high_frequency_filters = {
+                "emirate", "city", "property_type_id", "rent_type_id", 
+                "furnishing_status", "number_of_bedrooms", "number_of_bathrooms",
+                "property_status", "bnb_verification_status", "premiumBoostingStatus", 
+                "carouselBoostingStatus", "rent_charge", "property_size"
+            }
+            
             for key, value in filters.items():
                 if key not in allowed or value is None:
                     continue
+                
+                # Use root-level field for high-frequency filters (faster)
+                # Use metadata field for other filters (to avoid duplication)
+                filter_key = key if key in high_frequency_filters else f"metadata.{key}"
+                
                 if isinstance(value, dict):
-                    range_clause: Dict[str, Any] = {"range": {key: {}}}
+                    range_clause: Dict[str, Any] = {"range": {filter_key: {}}}
                     for bound in ("gte", "lte", "gt", "lt"):
                         if bound in value:
-                            range_clause["range"][key][bound] = value[bound]
-                    if range_clause["range"][key]:
+                            range_clause["range"][filter_key][bound] = value[bound]
+                    if range_clause["range"][filter_key]:
                         filter_clauses.append(range_clause)
                 elif isinstance(value, list):
-                    filter_clauses.append({"terms": {key: value}})
+                    filter_clauses.append({"terms": {filter_key: value}})
                 else:
-                    filter_clauses.append({"term": {key: value}})
+                    filter_clauses.append({"term": {filter_key: value}})
         if filter_clauses:
             es_query["query"] = {"bool": {"filter": filter_clauses}}
 

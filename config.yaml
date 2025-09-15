@@ -42,28 +42,98 @@ database:
     - carouselBoostingStatus
     - property_status
 
+    # ✅ Amenity fields (for embedding)
+    - maids_room
+    - security_available
+    - concierge_available
+    - central_ac_heating
+    - elevators
+    - balcony_terrace
+    - storage_room
+    - laundry_room
+    - gym_fitness_center
+    - childrens_play_area
+    - bbq_area
+    - pet_friendly
+    - smart_home_features
+    - beach_access
+    - jogging_cycling_tracks
+    - mosque_nearby
+
   # Optional: explicitly control which columns are used to compose the embedding text
+  # Fields that users naturally ask about when searching for properties to lease
   embedding_columns:
+    # Core property identification
     - property_title
     - property_description
-    - nearby_landmarks
     - building_name
+
+    # Location information (most important for property search)
+    - emirate
+    - city
+    - community
+    - subcommunity
+    - nearby_landmarks
+
+    # Property characteristics (what users filter by)
+    - furnishing_status
+    - property_type_id # Will be resolved to property type name
+    - rent_type_id # Will be resolved to rent type name
+
+    # Amenities and features (what users ask about)
+    - maids_room
+    - security_available
+    - concierge_available
+    - central_ac_heating
+    - elevators
+    - balcony_terrace
+    - storage_room
+    - laundry_room
+    - gym_fitness_center
+    - childrens_play_area
+    - bbq_area
+    - pet_friendly
+    - smart_home_features
+    - beach_access
+    - jogging_cycling_tracks
+    - mosque_nearby
 
   # Optional: explicit field type hints for dynamic ES mappings
   # Supported: keyword, text, integer, float
   field_types:
+    # Text fields for embedding
     property_title: text
     property_description: text
     nearby_landmarks: text
     building_name: text
-    emirate: keyword
-    city: keyword
+    emirate: text
+    city: text
+    community: text
+    subcommunity: text
+    furnishing_status: text
+
+    # Boolean fields for amenities (will be converted to text for embedding)
+    maids_room: text
+    security_available: text
+    concierge_available: text
+    central_ac_heating: text
+    elevators: text
+    balcony_terrace: text
+    storage_room: text
+    laundry_room: text
+    gym_fitness_center: text
+    childrens_play_area: text
+    bbq_area: text
+    pet_friendly: text
+    smart_home_features: text
+    beach_access: text
+    jogging_cycling_tracks: text
+    mosque_nearby: text
+
+    # Filter fields (keyword for fast filtering)
     district: keyword
-    community: keyword
-    subcommunity: keyword
     property_type_id: keyword
     rent_type_id: keyword
-    furnishing_status: keyword
     number_of_bedrooms: integer
     number_of_bathrooms: integer
     property_size: float
@@ -110,10 +180,8 @@ retrieval:
     - furnishing_status
     - number_of_bedrooms
     - number_of_bathrooms
-    - rent_charge_min
-    - rent_charge_max
-    - property_size_min
-    - property_size_max
+    - rent_charge
+    - property_size
     - bnb_verification_status
     - premiumBoostingStatus
     - carouselBoostingStatus

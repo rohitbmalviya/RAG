@@ -221,8 +221,9 @@ class VectorStoreClient(BaseVectorStore):
                     filter_clauses.append({"terms": {filter_key: value}})
                 else:
                     filter_clauses.append({"term": {filter_key: value}})
+        # IMPORTANT: Apply filters as KNN pre-filter for correct constrained ANN search
         if filter_clauses:
-            es_query["query"] = {"bool": {"filter": filter_clauses}}
+            knn["filter"] = {"bool": {"filter": filter_clauses}}
 
         try:
             resp = self._client.search(index=index, body=es_query, _source=True)

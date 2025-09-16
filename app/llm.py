@@ -232,21 +232,54 @@ class LLMClient(BaseLLM):
             "- Always acknowledge vague queries politely and guide the user naturally.\n"
         )
 
-    def chat(self, user_input: str, retrieved_chunks: Optional[List[RetrievedChunk]] = None) -> str:
-        """Process user query with greetings, clarifications, or polite handling of out-of-scope queries."""
+    def chat(
+        self,
+        user_input: str,
+        retrieved_chunks: Optional[List[RetrievedChunk]] = None,
+        applied_filters: Optional[Dict[str, object]] = None,
+    ) -> str:
+        """Conversational reply that: offers alternatives when no results; avoids repeating questions by honoring provided filters."""
         user_input = user_input.strip()
 
-        # Construct follow-up instruction block
+        # 1) If retrieval returned no results -> suggest alternatives instead of narrowing
+        if retrieved_chunks is not None and len(retrieved_chunks) == 0:
+            readable: List[str] = []
+            if applied_filters:
+                for k, v in applied_filters.items():
+                    if v is None:
+                        continue
+                    if isinstance(v, dict):
+                        parts: List[str] = []
+                        if "gte" in v:
+                            parts.append(f">= {v['gte']}")
+                        if "lte" in v:
+                            parts.append(f"<= {v['lte']}")
+                        val = " and ".join(parts) if parts else str(v)
+                    else:
+                        val = ", ".join(map(str, v)) if isinstance(v, list) else str(v)
+                    readable.append(f"{k}: {val}")
+            constraints = f" for your filters (" + "; ".join(readable) + ")" if readable else ""
+            return (
+                f"I couldn't find matching properties{constraints}. "
+                "Would you like to relax one or two filters (e.g., bedrooms, type, furnishing, size, budget) "
+                "or try a nearby emirate like Dubai or Abu Dhabi?"
+            )
+
+        # 2) Otherwise, build a single prompt that includes what user already provided to avoid repeats
+        provided_keys = sorted(list((applied_filters or {}).keys()))
+        provided_block = ", ".join(provided_keys)
+        guidance = (
+            "Rules:\n"
+            "- Do not repeat questions for details already provided in filters.\n"
+            "- Ask at most ONE clarifying question if truly needed (prefer budget or property type).\n"
+            "- Keep responses concise and conversational.\n"
+            "- Do not enumerate specific property details (no titles, buildings, IDs).\n"
+        )
+
         followup_prompt = (
-            f"{user_input}\n"
-            "Important rules:\n"
-            "- If greeting, greet back and ask a friendly clarifying property question.\n"
-            "- If unrelated to property, politely explain that I only handle UAE property queries and guide back.\n"
-            "- If outside UAE, politely explain I only support UAE properties and guide back.\n"
-            "- If about UAE properties, ask one clarifying question at a time (budget, type, bedrooms, size).\n"
-            "- If about general property knowledge, explain clearly without showing listings.\n"
-            "- If asked who I am, introduce myself as LeaseOasis, the UAE property assistant.\n"
-            "- Never list properties unless enough details are collected and retrieved context matches.\n"
+            f"{user_input}\n\n"
+            f"Filters already provided: {provided_block if provided_block else 'none'}\n"
+            f"{guidance}"
         )
 
         self.conversation.add_message("user", followup_prompt)

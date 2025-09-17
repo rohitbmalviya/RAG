@@ -136,7 +136,7 @@ async def query_endpoint(request: QueryRequest) -> QueryResponse:
             filters=filters,
             top_k=request.top_k,
         )
-        answer = pipeline_state.llm_client.chat(normalized_query, retrieved_chunks=chunks, applied_filters=filters)
+        answer = pipeline_state.llm_client.chat(normalized_query, retrieved_chunks=chunks)
         filtered_chunks = filter_retrieved_chunks(chunks, min_score=0.7)
         sources: List[SourceItem] = [
             SourceItem(score=c.score, text=c.text, metadata=c.metadata)

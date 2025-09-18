@@ -88,6 +88,20 @@ def _compose_text(row: Dict[str, object], columns: List[str]) -> str:
     
     return "\n".join(segments)
 
+def _select_embedding_columns(settings: Settings, all_cols: List[str]) -> List[str]:
+    """
+    Determine which columns should be embedded.
+    Priority:
+    1) If settings.database.embedding_columns is provided, use its intersection with available columns
+    2) Otherwise, use columns explicitly typed as 'text' in settings.database.field_types
+    This prevents accidentally embedding numeric/boolean/keyword fields when embedding_columns is empty.
+    """
+    db = settings.database
+    if db.embedding_columns:
+        return [c for c in db.embedding_columns if c in all_cols]
+    field_types = db.field_types or {}
+    return [c for c in all_cols if field_types.get(c) == "text"]
+
 def _extract_media_metadata(src: Dict[str, object]) -> Dict[str, object]:
     """
     Extract media objects from a 'media' array if present. Produces:
@@ -178,7 +192,7 @@ def _load_documents_from_csv(path: str, settings: Settings) -> Iterable[Document
     import csv
     logger = get_logger(__name__)
     cols = [c for c in settings.database.columns if c != settings.database.id_column]
-    embed_cols = [c for c in (settings.database.embedding_columns or cols) if c in cols]
+    embed_cols = _select_embedding_columns(settings, cols)
     with open(path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
@@ -199,7 +213,7 @@ def _load_documents_from_csv(path: str, settings: Settings) -> Iterable[Document
 def _load_documents_from_jsonl(path: str, settings: Settings) -> Iterable[Document]:
     logger = get_logger(__name__)
     cols = [c for c in settings.database.columns if c != settings.database.id_column]
-    embed_cols = [c for c in (settings.database.embedding_columns or cols) if c in cols]
+    embed_cols = _select_embedding_columns(settings, cols)
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
             if not line.strip():
@@ -237,7 +251,7 @@ def load_documents(settings: Settings, batch_size: int) -> Generator[List[Docume
     table = db.table
     id_col = db.id_column
     cols = [c for c in db.columns if c != id_col]
-    embed_cols = [c for c in (db.embedding_columns or cols) if c in cols]
+    embed_cols = _select_embedding_columns(settings, cols)
     # Some fields like images are derived from related tables or JSON inputs and
     # do not exist as columns in SQL. Exclude them from SELECT to avoid errors.
     image_meta_cols = {"media"}

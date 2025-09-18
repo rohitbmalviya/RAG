@@ -18,13 +18,10 @@ database:
   id_column: id
   columns:
     - id
-    # ✅ Embedding fields
     - property_title
     - property_description
     - nearby_landmarks
     - building_name
-
-    # ✅ Filter fields (structured search)
     - emirate
     - city
     - district
@@ -41,8 +38,6 @@ database:
     - premiumBoostingStatus
     - carouselBoostingStatus
     - property_status
-
-    # ✅ Amenity fields (for embedding)
     - maids_room
     - security_available
     - concierge_available
@@ -59,94 +54,64 @@ database:
     - beach_access
     - jogging_cycling_tracks
     - mosque_nearby
+    - media
 
-  # Optional: explicitly control which columns are used to compose the embedding text
-  # Fields that users naturally ask about when searching for properties to lease
+  # ✅ Embedding only descriptive text fields
   embedding_columns:
-    # Core property identification
     - property_title
     - property_description
     - building_name
-
-    # Location information (most important for property search)
-    - emirate
-    - city
-    - community
-    - subcommunity
     - nearby_landmarks
 
-    # Property characteristics (what users filter by)
-    - furnishing_status
-    - property_type_id # Will be resolved to property type name
-    - rent_type_id # Will be resolved to rent type name
-
-    # Amenities and features (what users ask about)
-    - maids_room
-    - security_available
-    - concierge_available
-    - central_ac_heating
-    - elevators
-    - balcony_terrace
-    - storage_room
-    - laundry_room
-    - gym_fitness_center
-    - childrens_play_area
-    - bbq_area
-    - pet_friendly
-    - smart_home_features
-    - beach_access
-    - jogging_cycling_tracks
-    - mosque_nearby
-
-  # Optional: explicit field type hints for dynamic ES mappings
-  # Supported: keyword, text, integer, float
+  # ✅ Filters for structured fields
   field_types:
-    # Text fields for embedding
     property_title: text
     property_description: text
     nearby_landmarks: text
     building_name: text
-    emirate: text
-    city: text
-    community: text
-    subcommunity: text
-    furnishing_status: text
 
-    # Boolean fields for amenities (will be converted to text for embedding)
-    maids_room: text
-    security_available: text
-    concierge_available: text
-    central_ac_heating: text
-    elevators: text
-    balcony_terrace: text
-    storage_room: text
-    laundry_room: text
-    gym_fitness_center: text
-    childrens_play_area: text
-    bbq_area: text
-    pet_friendly: text
-    smart_home_features: text
-    beach_access: text
-    jogging_cycling_tracks: text
-    mosque_nearby: text
-
-    # Filter fields (keyword for fast filtering)
+    emirate: keyword
+    city: keyword
     district: keyword
+    community: keyword
+    subcommunity: keyword
+
+    furnishing_status: keyword
     property_type_id: keyword
     rent_type_id: keyword
+
     number_of_bedrooms: integer
     number_of_bathrooms: integer
     property_size: float
     rent_charge: float
+
     bnb_verification_status: keyword
     premiumBoostingStatus: keyword
     carouselBoostingStatus: keyword
     property_status: keyword
 
+    maids_room: boolean
+    security_available: boolean
+    concierge_available: boolean
+    central_ac_heating: boolean
+    elevators: boolean
+    balcony_terrace: boolean
+    storage_room: boolean
+    laundry_room: boolean
+    gym_fitness_center: boolean
+    childrens_play_area: boolean
+    bbq_area: boolean
+    pet_friendly: boolean
+    smart_home_features: boolean
+    beach_access: boolean
+    jogging_cycling_tracks: boolean
+    mosque_nearby: boolean
+    media: json
+
 chunking:
   chunk_size: 500
   chunk_overlap: 50
-  unit: token # "token" or "char"
+  unit: token
 
 embedding:
   provider: google
@@ -175,16 +140,33 @@ retrieval:
     - district
     - community
     - subcommunity
-    - property_type_id # [Apartment,Villa,Townhouse,Penthouse,Office,Studio,Duplex ,Hotel/Serviced]
-    - rent_type_id # [Lease,Leasing - Holiday Home Ready,Management Fees]
+    - property_type_id
+    - rent_type_id
     - furnishing_status
     - number_of_bedrooms
     - number_of_bathrooms
     - rent_charge
     - property_size
-    - bnb_verification_status # (keyword verified extract the data which as status==verified)
-    - premiumBoostingStatus # (keyword premium extract the data which as status==active)
-    - carouselBoostingStatus # (keyword prime extract the data which as status==active)
+    - bnb_verification_status
+    - premiumBoostingStatus
+    - carouselBoostingStatus
+    - property_status
+    - maids_room
+    - security_available
+    - concierge_available
+    - central_ac_heating
+    - elevators
+    - balcony_terrace
+    - storage_room
+    - laundry_room
+    - gym_fitness_center
+    - childrens_play_area
+    - bbq_area
+    - pet_friendly
+    - smart_home_features
+    - beach_access
+    - jogging_cycling_tracks
+    - mosque_nearby
 
 llm:
   provider: google
@@ -194,3 +176,35 @@ llm:
 
 ingestion:
   batch_size: 500
+
+# ✅ Fallback Strategy
+fallback:
+  enable: true
+  strategy:
+    - ask_user_choice # ask if they want alternative search OR to provide requirements
+    - check_alternatives # if yes → try budget/bedroom/location flexibility
+    - requirement_capture # if no results, capture their requirement
+  alternatives:
+    budget_flex: 0.2 # allow +20% budget
+    bedroom_flex: 1 # allow +/-1 bedroom
+    nearby_communities: true
+  requirement_capture:
+    imp_fields:
+      - location
+      - property_type_id
+      - number_of_bedrooms
+      - rent_charge
+      - furnishing_status
+      - nearby_landmarks
+      - building_name
+      - rent_type_id
+    save_to_table: user_requirements
+    ask_confirmation: true
+
+memory:
+  type: llm
+  strategy:
+    keep_last_turns: 10 # keep last 10 exchanges raw
+    summarize_older: true # ask LLM to summarize older history
+    ttl_seconds: 900 # expire after 15 min of inactivity
+

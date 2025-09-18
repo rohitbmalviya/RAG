@@ -129,7 +129,6 @@ async def query_endpoint(request: QueryRequest) -> QueryResponse:
     if not request.query or not request.query.strip():
         raise HTTPException(status_code=400, detail="Query must not be empty")
     normalized_query, filters = preprocess_query(request.query,pipeline_state.llm_client)
-    print(filters)
     if is_property_query(normalized_query):
         chunks: List[RetrievedChunk] = pipeline_state.retriever_client.retrieve(
             normalized_query,

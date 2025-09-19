@@ -9,7 +9,7 @@ from .chunking import chunk_documents
 from .config import Settings, get_settings
 from .core.base import BaseEmbedder, BaseVectorStore, BaseLLM
 from .loader import load_documents
-from .llm import build_prompt, filter_retrieved_chunks,is_property_query
+from .llm import build_prompt, filter_retrieved_chunks, is_property_query
 from .models import RetrievedChunk
 from .retriever import Retriever
 from .utils import get_logger
@@ -46,6 +46,7 @@ def main() -> None:
 class QueryRequest(BaseModel):
     query: str
     top_k: Optional[int] = None
+    session_id: Optional[str] = None
 
 class SourceItem(BaseModel):
     score: float
@@ -63,6 +64,16 @@ class IngestRequest(BaseModel):
     source_type: Optional[str] = None
     source_path: Optional[str] = None
 
+class RequirementRequest(BaseModel):
+    user_query: str
+    preferences: Dict[str, Any]
+    conversation_summary: str
+    session_id: Optional[str] = None
+
+class RequirementResponse(BaseModel):
+    status: str
+    message: str
+
 class PipelineState:
     settings: Optional[Settings] = None
     embedder_client: Optional[BaseEmbedder] = None
@@ -72,6 +83,9 @@ class PipelineState:
     index_ready: bool = False
 
 pipeline_state = PipelineState()
+
+# Session management for conversations
+conversation_sessions: Dict[str, Any] = {}
 
 def initialize_components() -> None:
     settings = get_settings(os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.yaml"))
@@ -128,14 +142,24 @@ async def query_endpoint(request: QueryRequest) -> QueryResponse:
         raise HTTPException(status_code=500, detail="Server not initialized")
     if not request.query or not request.query.strip():
         raise HTTPException(status_code=400, detail="Query must not be empty")
-    normalized_query, filters = preprocess_query(request.query,pipeline_state.llm_client)
+    
+    # Get or create session
+    session_id = request.session_id or "default"
+    if session_id not in conversation_sessions:
+        conversation_sessions[session_id] = pipeline_state.llm_client
+    
+    llm_client = conversation_sessions[session_id]
+    
+    normalized_query, filters = preprocess_query(request.query, llm_client)
+    
+    # Check if it's a property query
     if is_property_query(normalized_query):
         chunks: List[RetrievedChunk] = pipeline_state.retriever_client.retrieve(
             normalized_query,
             filters=filters,
             top_k=request.top_k,
         )
-        answer = pipeline_state.llm_client.chat(normalized_query, retrieved_chunks=chunks)
+        answer = llm_client.chat(normalized_query, retrieved_chunks=chunks)
         filtered_chunks = filter_retrieved_chunks(chunks, min_score=0.7)
         sources: List[SourceItem] = [
             SourceItem(score=c.score, text=c.text, metadata=c.metadata)
@@ -143,7 +167,7 @@ async def query_endpoint(request: QueryRequest) -> QueryResponse:
         ]
         return QueryResponse(answer=answer, sources=sources)
     else:
-        answer = pipeline_state.llm_client.chat(normalized_query)
+        answer = llm_client.chat(normalized_query)
         return QueryResponse(answer=answer, sources=[])
 
 def _run_ingestion(batch_size: int, rebuild_index: bool) -> None:
@@ -201,6 +225,27 @@ async def ingest_endpoint(request: IngestRequest, background_tasks: BackgroundTa
     background_tasks.add_task(_run_ingestion, batch_size=batch_size, rebuild_index=request.rebuild_index)
     return {"status": "started", "batch_size": batch_size, "rebuild_index": request.rebuild_index}
 
+
+@app.post("/requirements", response_model=RequirementResponse)
+async def requirements_endpoint(request: RequirementRequest) -> RequirementResponse:
+    """Endpoint to save user requirements"""
+    try:
+        # In a real implementation, you would save this to a database
+        # For now, we'll just log it
+        logger.info(f"User requirement saved: {request.user_query}")
+        logger.info(f"Preferences: {request.preferences}")
+        logger.info(f"Conversation summary: {request.conversation_summary}")
+        
+        return RequirementResponse(
+            status="success",
+            message="Requirements saved successfully. Our team will work with agencies to find matching properties."
+        )
+    except Exception as exc:
+        logger.error(f"Failed to save requirements: {exc}")
+        return RequirementResponse(
+            status="error",
+            message="Failed to save requirements. Please try again later."
+        )
 
 @app.get("/health")
 async def health() -> Dict[str, Any]:

@@ -20,24 +20,35 @@ database:
     - id
     - property_title
     - property_description
-    - nearby_landmarks
-    - building_name
+    - property_type_id
+    - furnishing_status
+    - number_of_bathrooms
+    - number_of_bedrooms
+    - property_size
+    - year_built
+    - floor_level
     - emirate
     - city
-    - district
     - community
     - subcommunity
-    - property_type_id
+    - building_name
+    - apartment_unit_number
+    - nearby_landmarks
+    - plot_number
+    - developer_name
     - rent_type_id
-    - furnishing_status
-    - number_of_bedrooms
-    - number_of_bathrooms
-    - property_size
     - rent_charge
-    - bnb_verification_status
-    - premiumBoostingStatus
-    - carouselBoostingStatus
-    - property_status
+    - lease_duration
+    - payment_terms
+    - sublease_allowed
+    - lease_start_date
+    - lease_end_date
+    - security_deposit
+    - setup_grace_period
+    - maintenance_charge
+    - maintenance_covered_by
+    - parking
+    - swimming_pool
     - maids_room
     - security_available
     - concierge_available
@@ -51,9 +62,23 @@ database:
     - bbq_area
     - pet_friendly
     - smart_home_features
+    - waste_disposal_system
+    - power_backup
+    - mosque_nearby
     - beach_access
     - jogging_cycling_tracks
-    - mosque_nearby
+    - property_view_id
+    - unit_number
+    - public_transport_type
+    - retail_shopping_access
+    - available_from
+    - tenancy_start_date
+    - listing_date
+    - chiller_included
+    - property_status
+    - premiumBoostingStatus
+    - carouselBoostingStatus
+    - bnb_verification_status
     - media
 
   # ✅ Embedding only descriptive text fields
@@ -62,34 +87,51 @@ database:
     - property_description
     - building_name
     - nearby_landmarks
+    - developer_name
+    - floor_level
+    - apartment_unit_number
 
   # ✅ Filters for structured fields
   field_types:
+    # Text fields for embedding
     property_title: text
     property_description: text
-    nearby_landmarks: text
     building_name: text
+    nearby_landmarks: text
+    developer_name: text
+    floor_level: text
+    apartment_unit_number: text
 
+    # Location fields
     emirate: keyword
     city: keyword
-    district: keyword
     community: keyword
     subcommunity: keyword
 
-    furnishing_status: keyword
+    # Property type and status
     property_type_id: keyword
+    furnishing_status: keyword
     rent_type_id: keyword
+    property_status: keyword
+    maintenance_covered_by: keyword
 
+    # Numeric fields
     number_of_bedrooms: integer
     number_of_bathrooms: integer
     property_size: float
+    year_built: integer
+    plot_number: integer
+    unit_number: integer
     rent_charge: float
+    security_deposit: float
+    maintenance_charge: float
 
+    # Boosting and verification
     bnb_verification_status: keyword
     premiumBoostingStatus: keyword
     carouselBoostingStatus: keyword
-    property_status: keyword
 
+    # Boolean amenities
     maids_room: boolean
     security_available: boolean
     concierge_available: boolean
@@ -103,10 +145,33 @@ database:
     bbq_area: boolean
     pet_friendly: boolean
     smart_home_features: boolean
+    waste_disposal_system: boolean
+    power_backup: boolean
+    mosque_nearby: boolean
     beach_access: boolean
     jogging_cycling_tracks: boolean
-    mosque_nearby: boolean
+    chiller_included: boolean
+    sublease_allowed: boolean
+
+    # JSON fields
+    parking: json
+    swimming_pool: json
+    public_transport_type: json
+    retail_shopping_access: json
     media: json
+
+    # Date fields (stored as strings for filtering)
+    lease_start_date: keyword
+    lease_end_date: keyword
+    available_from: keyword
+    tenancy_start_date: keyword
+    listing_date: keyword
+
+    # Other fields
+    lease_duration: keyword
+    payment_terms: keyword
+    setup_grace_period: keyword
+    property_view_id: keyword
 
 chunking:
   chunk_size: 500
@@ -135,22 +200,34 @@ retrieval:
   top_k: 8
   num_candidates_multiplier: 20
   filter_fields:
+    # Location filters
     - emirate
     - city
-    - district
     - community
     - subcommunity
+
+    # Property type and status
     - property_type_id
-    - rent_type_id
     - furnishing_status
+    - rent_type_id
+    - property_status
+    - maintenance_covered_by
+
+    # Numeric filters
     - number_of_bedrooms
     - number_of_bathrooms
-    - rent_charge
     - property_size
+    - year_built
+    - rent_charge
+    - security_deposit
+    - maintenance_charge
+
+    # Boosting and verification
     - bnb_verification_status
     - premiumBoostingStatus
     - carouselBoostingStatus
-    - property_status
+
+    # Boolean amenities
     - maids_room
     - security_available
     - concierge_available
@@ -164,9 +241,24 @@ retrieval:
     - bbq_area
     - pet_friendly
     - smart_home_features
+    - waste_disposal_system
+    - power_backup
+    - mosque_nearby
     - beach_access
     - jogging_cycling_tracks
-    - mosque_nearby
+    - chiller_included
+    - sublease_allowed
+
+    # Date filters
+    - available_from
+    - lease_start_date
+    - lease_end_date
+    - tenancy_start_date
+    - listing_date
+
+    # Other filters
+    - lease_duration
+    - developer_name
 
 llm:
   provider: google
@@ -181,12 +273,11 @@ ingestion:
 fallback:
   enable: true
   strategy:
-    - ask_user_choice # ask if they want alternative search OR to provide requirements
-    - check_alternatives # if yes → try budget/bedroom/location flexibility
-    - requirement_capture # if no results, capture their requirement
+    - check_alternatives
+    - requirement_capture
   alternatives:
-    budget_flex: 0.2 # allow +20% budget
-    bedroom_flex: 1 # allow +/-1 bedroom
+    budget_flex: 0.2
+    bedroom_flex: 1
     nearby_communities: true
   requirement_capture:
     imp_fields:
@@ -208,3 +299,17 @@ memory:
     summarize_older: true # ask LLM to summarize older history
     ttl_seconds: 900 # expire after 15 min of inactivity
 
+# Requirement gathering configuration
+requirement_gathering:
+  endpoint: "http://localhost:5000/backend/api/v1/user/requirement"
+  enabled: true
+  auto_save_on_conversation_end: true
+  ask_user_confirmation: true
+  priority_fields:
+    - location
+    - property_type_id
+    - number_of_bedrooms
+    - rent_charge
+    - furnishing_status
+    - amenities
+    - lease_duration

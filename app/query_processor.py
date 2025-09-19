@@ -187,7 +187,11 @@ def extract_filters_with_llm(query: str, llm_client: LLMClient) -> Dict[str, Any
           "- For numbers with K/M (e.g., 120k, 1.2M), convert to AED integer/float.\n"
           "- For ceilings like 'under 120k', output rent_charge as {\"lte\": 120000}.\n"
           "- Map 'verified' to bnb_verification_status: 'verified'.\n"
+          "- Map 'premium' to premiumBoostingStatus: 'Active'.\n"
+          "- Map 'prime' to carouselBoostingStatus: 'Active'.\n"
           "- Booleans like 'pet-friendly', 'gym', 'beach access' -> true.\n"
+          "- For 'best property' queries, prioritize verified and boosted properties.\n"
+          "- For location queries, map to emirate, city, community, or subcommunity.\n"
           "- Do not invent values. If not clearly implied, omit the field.\n\n"
         f"User query: {query}\n\nOutput JSON:"
     )
@@ -253,10 +257,32 @@ def extract_filters_with_llm(query: str, llm_client: LLMClient) -> Dict[str, Any
     return result
 
 
+def is_best_property_query(query: str) -> bool:
+    """Check if the query is asking for 'best' properties"""
+    query = query.lower().strip()
+    best_keywords = ["best", "top", "premium", "featured", "recommended", "highest rated"]
+    return any(keyword in query for keyword in best_keywords)
+
+def is_average_price_query(query: str) -> bool:
+    """Check if the query is asking for average prices"""
+    query = query.lower().strip()
+    price_keywords = ["average", "mean", "typical", "usual", "normal"]
+    price_indicators = ["price", "rent", "cost", "rate"]
+    return any(keyword in query for keyword in price_keywords) and any(indicator in query for indicator in price_indicators)
+
 def preprocess_query(query: str, llm_client: LLMClient) -> Tuple[str, Dict[str, Any]]:
     """
     Preprocess query using LLM-only filter extraction restricted to configured fields.
     """
     filters = extract_filters_with_llm(query, llm_client)
-    print("filters",filters)
+    
+    # Add special handling for "best property" queries
+    if is_best_property_query(query):
+        # Prioritize verified and boosted properties
+        if "bnb_verification_status" not in filters:
+            filters["bnb_verification_status"] = "verified"
+        if "premiumBoostingStatus" not in filters:
+            filters["premiumBoostingStatus"] = "Active"
+    
+    print("filters", filters)
     return query, filters

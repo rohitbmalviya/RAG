@@ -61,7 +61,8 @@ def _compose_text(row: Dict[str, object], columns: List[str]) -> str:
             "maids_room", "security_available", "concierge_available", "central_ac_heating",
             "elevators", "balcony_terrace", "storage_room", "laundry_room", "gym_fitness_center",
             "childrens_play_area", "bbq_area", "pet_friendly", "smart_home_features",
-            "beach_access", "jogging_cycling_tracks", "mosque_nearby"
+            "beach_access", "jogging_cycling_tracks", "mosque_nearby", "waste_disposal_system",
+            "power_backup", "chiller_included", "sublease_allowed"
         }:
             if value_str.lower() in {"true", "1", "yes"}:
                 amenity_name = col.replace('_', ' ').replace('available', '').replace('  ', ' ').strip()
@@ -79,8 +80,30 @@ def _compose_text(row: Dict[str, object], columns: List[str]) -> str:
             if rent_type_name:
                 segments.append(f"Rent Type: {rent_type_name}")
                 continue
-                
-        segments.append(f"{col.replace('_', ' ').title()}: {value_str}")
+        
+        # Handle special formatting for certain fields
+        if col == "rent_charge":
+            segments.append(f"Annual Rent: AED {value_str}")
+        elif col == "security_deposit":
+            segments.append(f"Security Deposit: AED {value_str}")
+        elif col == "maintenance_charge":
+            segments.append(f"Maintenance Charge: AED {value_str}")
+        elif col == "property_size":
+            segments.append(f"Property Size: {value_str} sq.ft.")
+        elif col == "year_built":
+            segments.append(f"Year Built: {value_str}")
+        elif col == "lease_duration":
+            segments.append(f"Lease Duration: {value_str}")
+        elif col == "available_from":
+            segments.append(f"Available From: {value_str}")
+        elif col == "developer_name":
+            segments.append(f"Developer: {value_str}")
+        elif col in {"parking", "swimming_pool", "public_transport_type", "retail_shopping_access"}:
+            # Handle JSON fields for amenities
+            if value_str and value_str != "null":
+                segments.append(f"{col.replace('_', ' ').title()}: {value_str}")
+        else:
+            segments.append(f"{col.replace('_', ' ').title()}: {value_str}")
     
     # Add amenities as a single section
     if amenities:
@@ -280,6 +303,7 @@ def load_documents(settings: Settings, batch_size: int) -> Generator[List[Docume
         FROM "{table}" p
         LEFT JOIN property_types pt ON p.property_type_id = pt.id
         LEFT JOIN property_rent_types prt ON p.rent_type_id = prt.id
+        WHERE p.property_status = 'listed'
         """
         logger.info(f"Loading documents from table '{table}' with columns {cols} and joined property/rent type names")
         if id_col not in db.columns:

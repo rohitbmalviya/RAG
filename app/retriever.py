@@ -39,11 +39,50 @@ class Retriever:
         max_score = max(raw_scores) if raw_scores else 1.0
         min_score = min(raw_scores) if raw_scores else 0.0
         denom = (max_score - min_score) if (max_score - min_score) > 0 else 1.0
+        
         for hit in hits:
             raw = float(hit.get("_score", 0.0))
-            score = (raw - min_score) / denom
+            base_score = (raw - min_score) / denom
+            
+            # Apply boosting for premium/verified properties
             source = hit.get("_source", {})
+            metadata = source.get("metadata", {})
+            
+            # Calculate priority score based on verification and boosting status
+            priority_score = self._calculate_priority_score(metadata)
+            
+            # Combine base similarity score with priority score
+            final_score = min(1.0, base_score + priority_score)
+            
             chunks.append(
-                RetrievedChunk(score=score, text=source.get("text", ""), metadata=source.get("metadata", {}))
+                RetrievedChunk(score=final_score, text=source.get("text", ""), metadata=metadata)
             )
+        
+        # Sort by final score (highest first)
+        chunks.sort(key=lambda x: x.score, reverse=True)
+        
         return chunks
+
+    def _calculate_priority_score(self, metadata: Dict[str, Any]) -> float:
+        """Calculate priority score based on verification and boosting status"""
+        priority_score = 0.0
+        
+        # Priority 1: All three conditions met (premium + prime + verified)
+        if (metadata.get("premiumBoostingStatus") == "Active" and 
+            metadata.get("carouselBoostingStatus") == "Active" and 
+            metadata.get("bnb_verification_status") == "verified"):
+            priority_score = 0.3
+        
+        # Priority 2: Verified only
+        elif metadata.get("bnb_verification_status") == "verified":
+            priority_score = 0.2
+        
+        # Priority 3: Prime boosting only
+        elif metadata.get("carouselBoostingStatus") == "Active":
+            priority_score = 0.15
+        
+        # Priority 4: Premium boosting only
+        elif metadata.get("premiumBoostingStatus") == "Active":
+            priority_score = 0.1
+        
+        return priority_score

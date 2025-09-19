@@ -231,3 +231,23 @@ class VectorStoreClient(BaseVectorStore):
             raise
         hits = resp.get("hits", {}).get("hits", [])
         return hits
+
+    def delete_by_source_id(self, source_id: str) -> int:
+        index = self._config.index
+        # Delete documents associated to the property id via source_id only
+        query = {
+            "bool": {
+                "should": [
+                    {"term": {"source_id": source_id}},
+                    {"term": {"metadata.source_id": source_id}},
+                ],
+                "minimum_should_match": 1,
+            }
+        }
+        try:
+            resp = self._client.delete_by_query(index=index, body={"query": query}, refresh=self._config.refresh_on_write, conflicts="proceed")
+        except Exception as exc:
+            self._logger.error("Failed to delete by source_id %s: %s", source_id, exc)
+            raise
+        deleted = int(resp.get("deleted", 0)) if isinstance(resp, dict) else 0
+        return deleted

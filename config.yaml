@@ -275,10 +275,6 @@ fallback:
   strategy:
     - check_alternatives
     - requirement_capture
-  alternatives:
-    budget_flex: 0.2
-    bedroom_flex: 1
-    nearby_communities: true
   requirement_capture:
     imp_fields:
       - location

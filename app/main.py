@@ -8,7 +8,7 @@ from .query_processor import preprocess_query
 from .chunking import chunk_documents
 from .config import Settings, get_settings
 from .core.base import BaseEmbedder, BaseVectorStore, BaseLLM
-from .loader import load_documents
+from .loader import load_documents, load_document_by_id
 from .llm import build_prompt, filter_retrieved_chunks, is_property_query
 from .models import RetrievedChunk
 from .retriever import Retriever
@@ -63,6 +63,15 @@ class IngestRequest(BaseModel):
     parallel: Optional[bool] = None
     source_type: Optional[str] = None
     source_path: Optional[str] = None
+
+class UpsertOneResponse(BaseModel):
+    status: str
+    indexed_chunks: int
+    errors: int
+
+class DeleteResponse(BaseModel):
+    status: str
+    deleted: int
 
 class RequirementRequest(BaseModel):
     user_query: str
@@ -225,6 +234,47 @@ async def ingest_endpoint(request: IngestRequest, background_tasks: BackgroundTa
     background_tasks.add_task(_run_ingestion, batch_size=batch_size, rebuild_index=request.rebuild_index)
     return {"status": "started", "batch_size": batch_size, "rebuild_index": request.rebuild_index}
 
+
+@app.post("/ingest/{property_id}", response_model=UpsertOneResponse)
+async def ingest_single_property(property_id: str) -> UpsertOneResponse:
+    if not (pipeline_state.settings and pipeline_state.embedder_client and pipeline_state.vector_store_client):
+        raise HTTPException(status_code=500, detail="Server not initialized")
+    settings = pipeline_state.settings
+    try:
+        dims = pipeline_state.vector_store_client._config.dims if pipeline_state.vector_store_client and pipeline_state.vector_store_client._config.dims else pipeline_state.embedder_client.get_dimension()
+        pipeline_state.vector_store_client.ensure_index(int(dims))
+        pipeline_state.index_ready = True
+    except Exception as exc:
+        logger.error("Failed to prepare index: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to prepare index")
+
+    # Load single document by id
+    doc = load_document_by_id(settings, property_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Property not found")
+
+    # Chunk and embed
+    chunks = chunk_documents([doc],
+                             chunk_size=settings.chunking.chunk_size,
+                             chunk_overlap=settings.chunking.chunk_overlap,
+                             unit=settings.chunking.unit)
+    if not chunks:
+        return UpsertOneResponse(status="no_content", indexed_chunks=0, errors=0)
+    texts = [c.text for c in chunks]
+    embeddings = pipeline_state.embedder_client.embed(texts, task_type="retrieval_document")
+    success, errors = pipeline_state.vector_store_client.upsert(chunks, embeddings, refresh=True)
+    return UpsertOneResponse(status="ok", indexed_chunks=int(success), errors=int(errors))
+
+@app.delete("/vectors/{property_id}", response_model=DeleteResponse)
+async def delete_vectors_by_id(property_id: str) -> DeleteResponse:
+    if not pipeline_state.vector_store_client:
+        raise HTTPException(status_code=500, detail="Server not initialized")
+    try:
+        deleted = pipeline_state.vector_store_client.delete_by_source_id(property_id)
+    except Exception as exc:
+        logger.error("Failed to delete vectors for %s: %s", property_id, exc)
+        raise HTTPException(status_code=500, detail="Failed to delete vectors")
+    return DeleteResponse(status="ok", deleted=deleted)
 
 @app.post("/requirements", response_model=RequirementResponse)
 async def requirements_endpoint(request: RequirementRequest) -> RequirementResponse:

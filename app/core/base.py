@@ -38,4 +38,12 @@ class BaseVectorStore(ABC):
     ) -> List[Dict[str, Any]]:
         raise NotImplementedError
 
+    @abstractmethod
+    def delete_by_source_id(self, source_id: str) -> int:
+        """
+        Delete all chunks/documents whose metadata.source_id (or id prefix before ':') equals the given id.
+        Returns the number of deleted documents.
+        """
+        raise NotImplementedError
+
 

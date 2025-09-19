@@ -351,3 +351,60 @@ def load_documents(settings: Settings, batch_size: int) -> Generator[List[Docume
         yield from _yield_in_batches(_load_documents_from_txt(source_path, settings), batch_size)
         return
     logger.error("Unsupported ingestion source_type='%s' or missing source_path", source_type)
+
+
+def load_document_by_id(settings: Settings, record_id: str) -> Optional[Document]:
+    """
+    Load a single record from the configured SQL database by id and build a Document
+    with enriched metadata consistent with batch loader.
+    Returns None if not found or if source type unsupported.
+    """
+    logger = get_logger(__name__)
+    db = settings.database
+    source_type = (settings.ingestion.source_type or "sql").lower()
+    if source_type != "sql":
+        logger.error("Single-record load is only supported for SQL source_type; got '%s'", source_type)
+        return None
+    if not all([db.user, db.password, db.host, db.port, db.name]):
+        logger.error("Database connection details are incomplete for SQL ingestion")
+        return None
+    table = db.table
+    id_col = db.id_column
+    cols = [c for c in db.columns if c != id_col]
+    embed_cols = _select_embedding_columns(settings, cols)
+    quoted_id_col = f'"{id_col}"'
+    quoted_cols = [f'"{c}"' for c in cols if c != "media"]
+    # Qualify all column names with table alias to avoid ambiguity
+    qualified_columns: List[str] = [f'p.{quoted_id_col}'] + [f'p.{c}' for c in quoted_cols]
+    qualified_select_cols = ", ".join(qualified_columns)
+    sql = f"""
+        SELECT {qualified_select_cols},
+               pt.name as property_type_name,
+               prt.name as rent_type_name
+        FROM "{table}" p
+        LEFT JOIN property_types pt ON p.property_type_id = pt.id
+        LEFT JOIN property_rent_types prt ON p.rent_type_id = prt.id
+        WHERE p.{quoted_id_col} = %s
+    """
+    dsn = f"postgresql://{db.user}:{db.password}@{db.host}:{db.port}/{db.name}"
+    try:
+        with psycopg.connect(dsn, row_factory=dict_row) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (record_id,))
+                row: Optional[Dict[str, object]] = cur.fetchone()
+                if not row:
+                    return None
+                row_id = str(row[id_col])
+                metadata: Dict[str, object] = {"table": table, "id": row_id}
+                for c in cols:
+                    if c in row:
+                        metadata[c] = row.get(c)
+                # Enrich media metadata if media table exists
+                media_map = _build_media_map(conn, [row_id])
+                if row_id in media_map:
+                    metadata.update(media_map[row_id])
+                text = _compose_text(row, embed_cols)
+                return Document(id=row_id, text=text, metadata=metadata)
+    except Exception:
+        logger.exception("Failed to load record %s from table %s", record_id, table)
+        return None

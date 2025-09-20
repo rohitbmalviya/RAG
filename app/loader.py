@@ -7,6 +7,9 @@ from .config import Settings
 from .models import Document
 from .utils import get_logger
 
+# Constants to eliminate duplication
+UTF8_ENCODING = "utf-8"
+
 def _stringify_value(raw: Optional[object]) -> str:
     """
     Converts complex JSON/array/dict fields into a string representation.
@@ -216,7 +219,7 @@ def _load_documents_from_csv(path: str, settings: Settings) -> Iterable[Document
     logger = get_logger(__name__)
     cols = [c for c in settings.database.columns if c != settings.database.id_column]
     embed_cols = _select_embedding_columns(settings, cols)
-    with open(path, newline="", encoding="utf-8") as f:
+    with open(path, newline="", encoding=UTF8_ENCODING) as f:
         reader = csv.DictReader(f)
         for row in reader:
             row_id = str(row.get(settings.database.id_column) or row.get("id") or "")
@@ -237,7 +240,7 @@ def _load_documents_from_jsonl(path: str, settings: Settings) -> Iterable[Docume
     logger = get_logger(__name__)
     cols = [c for c in settings.database.columns if c != settings.database.id_column]
     embed_cols = _select_embedding_columns(settings, cols)
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, "r", encoding=UTF8_ENCODING) as f:
         for line in f:
             if not line.strip():
                 continue
@@ -254,7 +257,7 @@ def _load_documents_from_jsonl(path: str, settings: Settings) -> Iterable[Docume
             yield Document(id=row_id, text=text, metadata=metadata)
 
 def _load_documents_from_txt(path: str, settings: Settings) -> Iterable[Document]:
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, "r", encoding=UTF8_ENCODING) as f:
         text = f.read()
     meta: Dict[str, object] = {"table": settings.database.table or "file", "id": "0"}
     yield Document(id="0", text=text, metadata=meta)

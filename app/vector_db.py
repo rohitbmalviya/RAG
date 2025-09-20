@@ -7,6 +7,12 @@ from .core.base import BaseVectorStore
 from .models import Document
 from .utils import get_logger
 
+# Constants to eliminate duplication
+KEYWORD_TYPE = "keyword"
+TEXT_TYPE = "text"
+INTEGER_TYPE = "integer"
+FLOAT_TYPE = "float"
+
 class VectorStoreClient(BaseVectorStore):
     def __init__(self, config: VectorDBConfig) -> None:
         self._logger = get_logger(__name__)
@@ -44,13 +50,13 @@ class VectorStoreClient(BaseVectorStore):
 
         # Default required fields
         props: Dict[str, Any] = {
-            "id": {"type": "keyword"},
-            "text": {"type": "text"},
-            "table": {"type": "keyword"},
-            "source_id": {"type": "keyword"},
-            "chunk_index": {"type": "integer"},
-            "chunk_offset": {"type": "integer"},
-            "chunk_unit": {"type": "keyword"},
+            "id": {"type": KEYWORD_TYPE},
+            "text": {"type": TEXT_TYPE},
+            "table": {"type": KEYWORD_TYPE},
+            "source_id": {"type": KEYWORD_TYPE},
+            "chunk_index": {"type": INTEGER_TYPE},
+            "chunk_offset": {"type": INTEGER_TYPE},
+            "chunk_unit": {"type": KEYWORD_TYPE},
             "embedding": {
                 "type": "dense_vector",
                 "dims": dims,
@@ -64,26 +70,26 @@ class VectorStoreClient(BaseVectorStore):
             if field_name in props:
                 return
             explicit = (field_types.get(field_name) or "").lower()
-            if explicit in {"keyword", "text", "integer", "float"}:
-                if explicit == "text":
+            if explicit in {KEYWORD_TYPE, TEXT_TYPE, INTEGER_TYPE, FLOAT_TYPE}:
+                if explicit == TEXT_TYPE:
                     props[field_name] = {
-                        "type": "text",
-                        "fields": {"keyword": {"type": "keyword", "ignore_above": 256}},
+                        "type": TEXT_TYPE,
+                        "fields": {"keyword": {"type": KEYWORD_TYPE, "ignore_above": 256}},
                     }
                 else:
                     props[field_name] = {"type": explicit}
                 return
             if field_name in filter_fields or field_name.endswith("_id"):
-                props[field_name] = {"type": "keyword"}
+                props[field_name] = {"type": KEYWORD_TYPE}
                 return
             if field_name.endswith("_min") or field_name.endswith("_max"):
                 base = field_name[:-4]
                 base_type = (field_types.get(base) or "").lower()
-                props[field_name] = {"type": "integer" if base_type == "integer" else "float"}
+                props[field_name] = {"type": INTEGER_TYPE if base_type == INTEGER_TYPE else FLOAT_TYPE}
                 return
             props[field_name] = {
-                "type": "text",
-                "fields": {"keyword": {"type": "keyword", "ignore_above": 256}},
+                "type": TEXT_TYPE,
+                "fields": {"keyword": {"type": KEYWORD_TYPE, "ignore_above": 256}},
             }
         for col in columns:
             _add_field(col)

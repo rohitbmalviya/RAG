@@ -14,6 +14,10 @@ from .retriever import Retriever
 from .utils import get_logger
 from .factories import build_embedder, build_llm, build_vector_store
 from fastapi.middleware.cors import CORSMiddleware
+
+# Constants to eliminate duplication
+SERVER_NOT_INITIALIZED = "Server not initialized"
+COMPONENTS_NOT_INITIALIZED = "Components not initialized"
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -123,7 +127,7 @@ async def on_startup() -> None:
 @app.post("/query", response_model=QueryResponse)
 async def query_endpoint(request: QueryRequest) -> QueryResponse:
     if not (pipeline_state.retriever_client and pipeline_state.llm_client):
-        raise HTTPException(status_code=500, detail="Server not initialized")
+        raise HTTPException(status_code=500, detail=SERVER_NOT_INITIALIZED)
     if not request.query or not request.query.strip():
         raise HTTPException(status_code=400, detail="Query must not be empty")
     
@@ -157,7 +161,7 @@ async def query_endpoint(request: QueryRequest) -> QueryResponse:
 def _validate_components() -> None:
     """Validate that all required components are initialized"""
     if not (pipeline_state.settings and pipeline_state.embedder_client and pipeline_state.vector_store_client):
-        raise RuntimeError("Components not initialized")
+        raise RuntimeError(COMPONENTS_NOT_INITIALIZED)
 
 def _prepare_index(rebuild_index: bool = False) -> None:
     """Prepare the vector index with proper error handling"""
@@ -207,7 +211,7 @@ def _run_ingestion(batch_size: int, rebuild_index: bool) -> None:
 @app.post("/ingest")
 async def ingest_endpoint(request: IngestRequest, background_tasks: BackgroundTasks) -> Dict[str, Any]:
     if not pipeline_state.settings:
-        raise HTTPException(status_code=500, detail="Server not initialized")
+        raise HTTPException(status_code=500, detail=SERVER_NOT_INITIALIZED)
     if request.source_type:
         pipeline_state.settings.ingestion.source_type = request.source_type
     if request.source_path:
@@ -246,7 +250,7 @@ async def ingest_single_property(property_id: str) -> UpsertOneResponse:
 @app.delete("/vectors/{property_id}", response_model=DeleteResponse)
 async def delete_vectors_by_id(property_id: str) -> DeleteResponse:
     if not pipeline_state.vector_store_client:
-        raise HTTPException(status_code=500, detail="Server not initialized")
+        raise HTTPException(status_code=500, detail=SERVER_NOT_INITIALIZED)
     try:
         deleted = pipeline_state.vector_store_client.delete_by_source_id(property_id)
     except Exception as exc:

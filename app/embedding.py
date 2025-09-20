@@ -4,6 +4,10 @@ from tenacity import RetryError, retry, stop_after_attempt, wait_exponential
 from .config import EmbeddingConfig
 from .core.base import BaseEmbedder
 from .utils import get_logger
+
+# Constants to eliminate duplication
+GOOGLE_PROVIDER = "google"
+OPENAI_PROVIDER = "openai"
 # Provider registry and decorator
 EMBEDDING_PROVIDERS: Dict[str, Type["BaseEmbeddingProvider"]] = {}
 def register_embedding_provider(name: str) -> Callable[[Type["BaseEmbeddingProvider"]], Type["BaseEmbeddingProvider"]]:
@@ -29,7 +33,7 @@ class BaseEmbeddingProvider:
     def _embed_single(self, text: str, task_type: Optional[str] = None) -> List[float]:
         raise NotImplementedError
 # Google Embedding Provider
-@register_embedding_provider("google")
+@register_embedding_provider(GOOGLE_PROVIDER)
 class GoogleEmbedding(BaseEmbeddingProvider):
     def _setup_client(self) -> None:
         try:
@@ -55,7 +59,7 @@ class GoogleEmbedding(BaseEmbeddingProvider):
         vector = response["embedding"] if isinstance(response, dict) else response.embedding
         return list(vector)
 # OpenAI Embedding Provider
-@register_embedding_provider("openai")
+@register_embedding_provider(OPENAI_PROVIDER)
 @register_embedding_provider("azure_openai")
 class OpenAIEmbedding(BaseEmbeddingProvider):
     def _setup_client(self) -> None:
@@ -79,7 +83,7 @@ class EmbeddingClient(BaseEmbedder):
     def __init__(self, config: EmbeddingConfig) -> None:
         self._config = config
         self._logger = get_logger(__name__)
-        provider_name = (config.provider or "google").lower()
+        provider_name = (config.provider or GOOGLE_PROVIDER).lower()
         provider_cls = EMBEDDING_PROVIDERS.get(provider_name)
         if provider_cls is None:
             raise ValueError(f"Unsupported embedding provider: {config.provider}")

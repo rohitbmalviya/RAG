@@ -5,6 +5,10 @@ from .models import RetrievedChunk
 from .core.base import BaseEmbedder, BaseVectorStore
 from .utils import get_logger
 
+# Constants to eliminate duplication
+ACTIVE_STATUS = "Active"
+VERIFIED_STATUS = "verified"
+
 class Retriever:
     def __init__(self, embedder: BaseEmbedder, store: BaseVectorStore, config: RetrievalConfig) -> None:
         self._embedder = embedder
@@ -71,21 +75,21 @@ class Retriever:
         priority_score = 0.0
         
         # Priority 1: All three conditions met (premium + prime + verified)
-        if (metadata.get("premiumBoostingStatus") == "Active" and 
-            metadata.get("carouselBoostingStatus") == "Active" and 
-            metadata.get("bnb_verification_status") == "verified"):
+        if (metadata.get("premiumBoostingStatus") == ACTIVE_STATUS and 
+            metadata.get("carouselBoostingStatus") == ACTIVE_STATUS and 
+            metadata.get("bnb_verification_status") == VERIFIED_STATUS):
             priority_score = 0.3
         
         # Priority 2: Verified only
-        elif metadata.get("bnb_verification_status") == "verified":
+        elif metadata.get("bnb_verification_status") == VERIFIED_STATUS:
             priority_score = 0.2
         
         # Priority 3: Prime boosting only
-        elif metadata.get("carouselBoostingStatus") == "Active":
+        elif metadata.get("carouselBoostingStatus") == ACTIVE_STATUS:
             priority_score = 0.15
         
         # Priority 4: Premium boosting only
-        elif metadata.get("premiumBoostingStatus") == "Active":
+        elif metadata.get("premiumBoostingStatus") == ACTIVE_STATUS:
             priority_score = 0.1
         
         return priority_score

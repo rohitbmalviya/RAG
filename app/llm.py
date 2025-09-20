@@ -1,6 +1,7 @@
 from __future__ import annotations
 from typing import Any, Callable, Dict, List, Optional, Type
 import time
+import requests
 from .config import LLMConfig, get_settings
 from .core.base import BaseLLM
 from .models import RetrievedChunk
@@ -375,6 +376,10 @@ class LLMClient(BaseLLM):
         """Process user query with greetings, clarifications, or polite handling of out-of-scope queries."""
         user_input = user_input.strip()
 
+        # Check for conversation flow responses (1, 2, yes, no)
+        if self._is_conversation_response(user_input):
+            return self._handle_conversation_response(user_input, retrieved_chunks)
+
         # Handle different types of queries
         if is_greeting(user_input):
             return self._handle_greeting(user_input)
@@ -390,6 +395,79 @@ class LLMClient(BaseLLM):
             return self._handle_property_query(user_input, retrieved_chunks)
         else:
             return self._handle_general_query(user_input)
+
+    def _is_conversation_response(self, user_input: str) -> bool:
+        """Check if user input is a conversation flow response"""
+        user_input = user_input.lower().strip()
+        return user_input in ["1", "2", "yes", "no", "option 1", "option 2", "first", "second", "save", "alternatives"]
+
+    def _handle_conversation_response(self, user_input: str, retrieved_chunks: Optional[List[RetrievedChunk]] = None):
+        """Handle user responses to conversation flow (1, 2, yes, no)"""
+        user_input = user_input.lower().strip()
+        
+        # Get recent conversation context
+        recent_messages = self.conversation.get_messages()[-2:]  # Last 2 messages
+        last_assistant_message = ""
+        for msg in reversed(recent_messages):
+            if msg["role"] == "assistant":
+                last_assistant_message = msg["content"]
+                break
+        
+        # Handle requirement gathering confirmation
+        if user_input in ["yes", "save"] and "save these requirements" in last_assistant_message:
+            return self._send_requirements_to_endpoint({
+                "user_query": " ".join([msg["content"] for msg in recent_messages if msg["role"] == "user"]),
+                "preferences": self.conversation.get_preferences(),
+                "conversation_summary": self._summarize_conversation_context(),
+                "session_id": str(id(self.conversation)),
+                "timestamp": time.time()
+            })
+        
+        elif user_input == "no" and "save these requirements" in last_assistant_message:
+            return (
+                "No problem! Let's continue exploring other options. "
+                "Would you like to try some alternative searches, or would you prefer to adjust your criteria? "
+                "I'm here to help you find the perfect property!"
+            )
+        
+        # Handle alternative selection
+        elif user_input in ["1", "option 1", "first", "alternatives"] and "Try alternate searches" in last_assistant_message:
+            from .main import pipeline_state
+            preferences = self.conversation.get_preferences()
+            verified_alternatives = self._get_verified_alternatives(preferences, pipeline_state.retriever_client)
+            
+            if verified_alternatives:
+                # Show properties for the first alternative
+                alt = verified_alternatives[0]
+                try:
+                    alt_chunks = pipeline_state.retriever_client.retrieve(
+                        f"properties {alt['suggestion']}", 
+                        filters=alt['filters'], 
+                        top_k=5
+                    )
+                    if alt_chunks:
+                        context_prompt = self._build_context_prompt(f"Show me {alt['suggestion']}", alt_chunks)
+                        response = self._safe_generate([{"role": "user", "content": context_prompt}])
+                        self.conversation.add_message("user", user_input)
+                        self.conversation.add_message("assistant", response)
+                        return response
+                except Exception:
+                    pass
+            
+            return (
+                "Let me search for alternative properties based on your preferences. "
+                "I'll look for nearby locations and similar options that might work for you."
+            )
+        
+        # Handle requirement gathering selection
+        elif user_input in ["2", "option 2", "second", "save"] and ("Gather your requirements" in last_assistant_message or "Save your requirements" in last_assistant_message):
+            return self.gather_requirements_and_send("User requested requirement gathering", ask_confirmation=True)
+        
+        # Default response for unclear conversation responses
+        return (
+            "I want to make sure I understand what you'd prefer. Could you tell me more specifically what you'd like to do? "
+            "For example, you could say 'show me alternatives' or 'save my requirements' or ask me a new question about properties."
+        )
 
     def _handle_greeting(self, user_input: str) -> str:
         """Handle greeting messages"""
@@ -574,23 +652,35 @@ class LLMClient(BaseLLM):
         return f"Instructions:\n{instructions}\n\nUser question:\n{user_input}\n\nContext:\n{context_block}\n\nAnswer:"
 
     def _handle_no_results(self, user_input: str, preferences: Dict[str, Any]) -> str:
-        """Handle cases where no properties are found"""
-        # Generate alternative suggestions based on preferences
-        alternatives = self._generate_alternative_suggestions(preferences)
+        """Handle cases where no properties are found - with context checking and requirement gathering"""
+        from .retriever import Retriever
+        from .main import pipeline_state
+        
+        # Check verified alternatives by querying vector database
+        verified_alternatives = self._get_verified_alternatives(preferences, pipeline_state.retriever_client)
+        
+        conversation_summary = self._summarize_conversation_context()
         
         response = (
-            "I couldn't find any properties matching your exact criteria. Let me help you in two ways:\n\n"
-            "1. **Try alternate searches**: I can suggest similar properties with slightly different criteria:\n"
+            f"I understand you're looking for a property, but unfortunately I couldn't find exact matches for your criteria in our current listings.\n\n"
+            f"Let me help you in two ways:\n\n"
         )
         
-        if alternatives:
-            for alt in alternatives[:3]:  # Show top 3 alternatives
-                response += f"   • {alt['suggestion']}\n"
+        if verified_alternatives:
+            response += "**1. 🔍 Try alternate searches** (I've verified these options exist in our database):\n"
+            for i, alt in enumerate(verified_alternatives[:3], 1):
+                response += f"   {i}. {alt['suggestion']} ({alt['count']} properties available)\n"
+            response += "\nWould you like me to show you properties for any of these alternatives?\n\n"
+        else:
+            response += "**1. 🔍 Expand search criteria**: I can help you adjust your requirements to find similar properties.\n\n"
         
         response += (
-            "\n2. **Gather your requirements**: I can save your preferences so our team can work with agencies to find matching properties for you.\n\n"
-            "Which option would you prefer? Or would you like to adjust your search criteria?"
+            "**2. 📝 Save your requirements**: I can gather what you're looking for and send it to our team. "
+            "They'll work with agencies to source properties that match your needs and notify you when available.\n\n"
+            "Which option would you prefer? Type '1' for alternatives or '2' to save your requirements, "
+            "or just tell me what you'd like to do next."
         )
+        
         return response
 
     def _generate_alternative_suggestions(self, preferences: Dict[str, Any]) -> List[Dict[str, str]]:
@@ -653,6 +743,205 @@ class LLMClient(BaseLLM):
                 })
         
         return alternatives
+
+    def _get_verified_alternatives(self, preferences: Dict[str, Any], retriever) -> List[Dict[str, Any]]:
+        """Check vector database for viable alternatives and return verified suggestions"""
+        verified_alternatives = []
+        
+        if not retriever:
+            return verified_alternatives
+            
+        try:
+            # Location alternatives - check nearby areas
+            if "emirate" in preferences:
+                current_emirate = preferences["emirate"]
+                nearby_locations = {
+                    "sharjah": ["dubai", "ajman"],
+                    "dubai": ["sharjah", "abu dhabi"], 
+                    "abu dhabi": ["dubai"],
+                    "ajman": ["sharjah", "dubai"],
+                    "fujairah": ["sharjah"],
+                    "ras al khaimah": ["dubai", "sharjah"]
+                }
+                
+                for nearby in nearby_locations.get(current_emirate, []):
+                    # Test query to check if properties exist
+                    test_filters = preferences.copy()
+                    test_filters["emirate"] = nearby
+                    
+                    try:
+                        # Quick retrieval test with small top_k
+                        test_chunks = retriever.retrieve(f"properties in {nearby}", filters=test_filters, top_k=1)
+                        if test_chunks and len(test_chunks) > 0:
+                            # Get approximate count with larger search
+                            count_chunks = retriever.retrieve(f"properties in {nearby}", filters=test_filters, top_k=10)
+                            verified_alternatives.append({
+                                "type": "location",
+                                "suggestion": f"Properties in {nearby.title()} (nearby emirate)",
+                                "filters": test_filters,
+                                "count": f"{len(count_chunks)}+"
+                            })
+                    except Exception:
+                        continue
+            
+            # Budget alternatives - check flexible pricing
+            if "rent_charge" in preferences and isinstance(preferences["rent_charge"], dict):
+                if "lte" in preferences["rent_charge"]:
+                    current_budget = preferences["rent_charge"]["lte"]
+                    
+                    # Try +20% budget
+                    test_filters = preferences.copy()
+                    test_filters["rent_charge"] = {"lte": int(current_budget * 1.2)}
+                    
+                    try:
+                        test_chunks = retriever.retrieve("properties", filters=test_filters, top_k=5)
+                        if test_chunks and len(test_chunks) > 0:
+                            verified_alternatives.append({
+                                "type": "budget",
+                                "suggestion": f"Properties up to AED {int(current_budget * 1.2):,}/year (20% higher budget)",
+                                "filters": test_filters,
+                                "count": f"{len(test_chunks)}+"
+                            })
+                    except Exception:
+                        pass
+            
+            # Property type alternatives
+            if "property_type_id" in preferences:
+                current_type = preferences["property_type_id"]
+                type_alternatives = {
+                    "apartment": ["studio", "duplex"],
+                    "villa": ["townhouse", "duplex"],
+                    "studio": ["apartment"],
+                    "townhouse": ["villa", "duplex"]
+                }
+                
+                for alt_type in type_alternatives.get(current_type, []):
+                    test_filters = preferences.copy()
+                    test_filters["property_type_id"] = alt_type
+                    
+                    try:
+                        test_chunks = retriever.retrieve(f"{alt_type} properties", filters=test_filters, top_k=3)
+                        if test_chunks and len(test_chunks) > 0:
+                            verified_alternatives.append({
+                                "type": "property_type", 
+                                "suggestion": f"{alt_type.title()}s instead of {current_type}s",
+                                "filters": test_filters,
+                                "count": f"{len(test_chunks)}+"
+                            })
+                            break  # Only suggest one alternative type
+                    except Exception:
+                        continue
+                        
+        except Exception as e:
+            self._logger.error(f"Error checking alternatives: {e}")
+            
+        return verified_alternatives[:3]  # Return top 3 verified alternatives
+
+    def _summarize_conversation_context(self) -> str:
+        """Summarize conversation for requirement gathering"""
+        messages = self.conversation.get_messages()
+        preferences = self.conversation.get_preferences()
+        
+        if not messages:
+            return "No conversation history available."
+            
+        # Extract key conversation points
+        user_messages = [msg["content"] for msg in messages if msg["role"] == "user"]
+        
+        summary_parts = []
+        summary_parts.append(f"User discussed: {'; '.join(user_messages[-3:])}")  # Last 3 user messages
+        
+        if preferences:
+            pref_items = []
+            for key, value in preferences.items():
+                if isinstance(value, dict) and "lte" in value:
+                    pref_items.append(f"{key}: up to {value['lte']}")
+                else:
+                    pref_items.append(f"{key}: {value}")
+            if pref_items:
+                summary_parts.append(f"Extracted preferences: {', '.join(pref_items)}")
+        
+        return " | ".join(summary_parts)
+
+    def gather_requirements_and_send(self, user_input: str, ask_confirmation: bool = True) -> str:
+        """Gather requirements and optionally send to endpoint"""
+        preferences = self.conversation.get_preferences()
+        conversation_summary = self._summarize_conversation_context()
+        
+        # Build comprehensive requirement summary
+        requirement_summary = {
+            "user_query": user_input,
+            "preferences": preferences,
+            "conversation_summary": conversation_summary,
+            "session_id": str(id(self.conversation)),
+            "timestamp": time.time()
+        }
+        
+        if ask_confirmation:
+            response = (
+                "I'll summarize what you're looking for:\n\n"
+                "**Your Requirements:**\n"
+            )
+            
+            if preferences:
+                for key, value in preferences.items():
+                    if isinstance(value, dict) and "lte" in value:
+                        response += f"• {key.replace('_', ' ').title()}: Up to {value['lte']:,}\n"
+                    else:
+                        response += f"• {key.replace('_', ' ').title()}: {value}\n"
+            else:
+                response += f"• Based on your query: {user_input}\n"
+                
+            response += (
+                f"\n**Conversation Summary:** {conversation_summary}\n\n"
+                "Would you like me to save these requirements? Our team will work with agencies to find matching properties and notify you when available.\n\n"
+                "Reply 'yes' to save, or 'no' to continue searching with different criteria."
+            )
+            
+            return response
+        else:
+            # Send to endpoint without confirmation
+            return self._send_requirements_to_endpoint(requirement_summary)
+    
+    def _send_requirements_to_endpoint(self, requirements: Dict[str, Any]) -> str:
+        """Send requirements to the backend endpoint"""
+        import requests
+        import time
+        
+        endpoint = "http://localhost:5000/backend/api/v1/user/requirement"
+        
+        try:
+            response = requests.post(
+                endpoint,
+                json=requirements,
+                timeout=10,
+                headers={"Content-Type": "application/json"}
+            )
+            
+            if response.status_code == 200:
+                self.conversation.set_requirement_gathered(True)
+                return (
+                    "✅ Perfect! I've saved your requirements and sent them to our team.\n\n"
+                    "Our property specialists will:\n"
+                    "• Work with local agencies to find matching properties\n"
+                    "• Add new listings that meet your criteria\n"
+                    "• Notify you when suitable properties become available\n\n"
+                    "Thank you for helping us improve our platform! Is there anything else I can help you with today?"
+                )
+            else:
+                return (
+                    "I've noted your requirements, but there was a technical issue saving them to our system. "
+                    "Don't worry - I can still help you search for properties or try again later. "
+                    "Would you like to continue exploring available options?"
+                )
+                
+        except Exception as e:
+            self._logger.error(f"Failed to send requirements to endpoint: {e}")
+            return (
+                "I've carefully noted your requirements! While there was a technical issue with our system, "
+                "I can still help you search for properties with different criteria. "
+                "Would you like to try some alternative searches?"
+            )
 
     def generate(self, prompt: str) -> str:
         """Fallback for BaseLLM compatibility."""

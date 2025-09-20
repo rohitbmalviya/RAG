@@ -528,6 +528,10 @@ class LLMClient(BaseLLM):
             context_lines.append("")
         return "\n".join(context_lines)
 
+    def _build_prompt_template(self, instructions: str, user_input: str, context_block: str) -> str:
+        """Build a standardized prompt template to eliminate duplication"""
+        return self._build_prompt_template(instructions, user_input, context_block)
+
     def _build_context_prompt(self, user_input: str, retrieved_chunks: List[RetrievedChunk]) -> str:
         """Build a context-aware prompt for property queries with conversation memory (Step 8)"""
         # Get conversation context for short-term memory
@@ -622,7 +626,7 @@ class LLMClient(BaseLLM):
             "- If no premium/verified properties exist, show the best available options.\n"
         )
 
-        return f"Instructions:\n{instructions}\n\nUser question:\n{user_input}\n\nContext:\n{context_block}\n\nAnswer:"
+        return self._build_prompt_template(instructions, user_input, context_block)
 
     def _build_average_price_prompt(self, user_input: str, retrieved_chunks: List[RetrievedChunk]) -> str:
         """Build a context-aware prompt for average price queries"""
@@ -639,7 +643,7 @@ class LLMClient(BaseLLM):
             "- Example format: 'The average rent for 2-bedroom apartments in Dubai Marina is AED 95,000/year based on the available data.'\n"
         )
 
-        return f"Instructions:\n{instructions}\n\nUser question:\n{user_input}\n\nContext:\n{context_block}\n\nAnswer:"
+        return self._build_prompt_template(instructions, user_input, context_block)
 
     def _handle_no_results(self, user_input: str, preferences: Dict[str, Any]) -> str:
         """Handle cases where no properties are found - with context checking and requirement gathering"""

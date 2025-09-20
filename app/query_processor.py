@@ -2,7 +2,7 @@ from __future__ import annotations
 from typing import Dict, Tuple, Any, List
 import re
 import json
-from .llm import LLMClient
+from .llm import LLMClient, is_best_property_query, is_average_price_query
 from .config import get_settings
 
 def extract_basic_filters(query: str, llm_client: LLMClient) -> Dict[str, Any]:
@@ -232,18 +232,6 @@ Output JSON:"""
     
     return result
 
-def is_best_property_query(query: str) -> bool:
-    """Check if the query is asking for 'best' properties"""
-    query = query.lower().strip()
-    best_keywords = ["best", "top", "premium", "featured", "recommended", "highest rated"]
-    return any(keyword in query for keyword in best_keywords)
-
-def is_average_price_query(query: str) -> bool:
-    """Check if the query is asking for average prices"""
-    query = query.lower().strip()
-    price_keywords = ["average", "mean", "typical", "usual", "normal"]
-    price_indicators = ["price", "rent", "cost", "rate"]
-    return any(keyword in query for keyword in price_keywords) and any(indicator in query for indicator in price_indicators)
 
 def preprocess_query(query: str, llm_client: LLMClient) -> Tuple[str, Dict[str, Any]]:
     """

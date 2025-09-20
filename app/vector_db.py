@@ -28,15 +28,19 @@ class VectorStoreClient(BaseVectorStore):
             return exists.body
         return bool(exists)
 
+    def _get_settings_data(self) -> tuple[List[str], List[str], Dict[str, str]]:
+        """Get commonly used settings data to eliminate duplication"""
+        settings = get_settings()
+        columns, filter_fields, field_types = self._get_settings_data()
+        return columns, filter_fields, field_types
+
     def ensure_index(self, dims: int) -> None:
         index = self._config.index
         settings = get_settings()
 
         if self._index_exists(index):
             return
-        columns: List[str] = list(settings.database.columns)
-        filter_fields: List[str] = list(settings.retrieval.filter_fields)
-        field_types: Dict[str, str] = dict(settings.database.field_types or {})
+        columns, filter_fields, field_types = self._get_settings_data()
 
         # Default required fields
         props: Dict[str, Any] = {

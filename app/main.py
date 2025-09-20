@@ -154,20 +154,28 @@ async def query_endpoint(request: QueryRequest) -> QueryResponse:
         answer = llm_client.chat(normalized_query)
         return QueryResponse(answer=answer, sources=[])
 
-def _run_ingestion(batch_size: int, rebuild_index: bool) -> None:
+def _validate_components() -> None:
+    """Validate that all required components are initialized"""
     if not (pipeline_state.settings and pipeline_state.embedder_client and pipeline_state.vector_store_client):
         raise RuntimeError("Components not initialized")
-    settings = pipeline_state.settings
+
+def _prepare_index(rebuild_index: bool = False) -> None:
+    """Prepare the vector index with proper error handling"""
     try:
-        dims = pipeline_state.vector_store_client._config.dims if pipeline_state.vector_store_client and pipeline_state.vector_store_client._config.dims else pipeline_state.embedder_client.get_dimension()  
+        dims = pipeline_state.vector_store_client._config.dims if pipeline_state.vector_store_client and pipeline_state.vector_store_client._config.dims else pipeline_state.embedder_client.get_dimension()
         if rebuild_index:
             logger.info("Rebuilding index '%s'", pipeline_state.vector_store_client._config.index)
             pipeline_state.vector_store_client.delete_index()
-        pipeline_state.vector_store_client.ensure_index(int(dims))  
+        pipeline_state.vector_store_client.ensure_index(int(dims))
         pipeline_state.index_ready = True
     except Exception as exc:
         logger.error("Failed to prepare index: %s", exc)
         raise
+
+def _run_ingestion(batch_size: int, rebuild_index: bool) -> None:
+    _validate_components()
+    settings = pipeline_state.settings
+    _prepare_index(rebuild_index)
     total_rows = 0
     total_chunks = 0
     total_indexed = 0
@@ -210,13 +218,10 @@ async def ingest_endpoint(request: IngestRequest, background_tasks: BackgroundTa
 
 @app.post("/ingest/{property_id}", response_model=UpsertOneResponse)
 async def ingest_single_property(property_id: str) -> UpsertOneResponse:
-    if not (pipeline_state.settings and pipeline_state.embedder_client and pipeline_state.vector_store_client):
-        raise HTTPException(status_code=500, detail="Server not initialized")
-    settings = pipeline_state.settings
     try:
-        dims = pipeline_state.vector_store_client._config.dims if pipeline_state.vector_store_client and pipeline_state.vector_store_client._config.dims else pipeline_state.embedder_client.get_dimension()
-        pipeline_state.vector_store_client.ensure_index(int(dims))
-        pipeline_state.index_ready = True
+        _validate_components()
+        settings = pipeline_state.settings
+        _prepare_index()
     except Exception as exc:
         logger.error("Failed to prepare index: %s", exc)
         raise HTTPException(status_code=500, detail="Failed to prepare index")

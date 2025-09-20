@@ -81,7 +81,7 @@ database:
     - bnb_verification_status
     - media
 
-  # ✅ Embedding only descriptive text fields
+  # ✅ Semantic fields for embedding (descriptive text content)
   embedding_columns:
     - property_title
     - property_description
@@ -90,6 +90,9 @@ database:
     - developer_name
     - floor_level
     - apartment_unit_number
+    - payment_terms
+    - setup_grace_period
+    - lease_duration
 
   # ✅ Filters for structured fields
   field_types:
@@ -101,6 +104,9 @@ database:
     developer_name: text
     floor_level: text
     apartment_unit_number: text
+    payment_terms: text
+    setup_grace_period: text
+    lease_duration: text
 
     # Location fields
     emirate: keyword
@@ -180,7 +186,7 @@ chunking:
 
 embedding:
   provider: google
-  model: ${LLM_EMBED_MODEL_NAME}
+  model: gemini-embedding-001  # Explicitly set to gemini-embedding-001
   api_key: ${LLM_MODEL_API_KEY}
   batch_size: 64
 
@@ -193,7 +199,7 @@ vector_db:
   index: rag_properties
   similarity: cosine
   refresh_on_write: false
-  dims: 3072
+  dims: 768  # Correct dimensions for gemini-embedding-001
   mapping_properties_key: properties
 
 retrieval:

@@ -384,7 +384,7 @@ def load_document_by_id(settings: Settings, record_id: str) -> Optional[Document
         FROM "{table}" p
         LEFT JOIN property_types pt ON p.property_type_id = pt.id
         LEFT JOIN property_rent_types prt ON p.rent_type_id = prt.id
-        WHERE p.{quoted_id_col} = %s
+        WHERE p.{quoted_id_col} = %s AND p.property_status = 'listed'
     """
     dsn = f"postgresql://{db.user}:{db.password}@{db.host}:{db.port}/{db.name}"
     try:

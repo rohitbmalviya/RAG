@@ -194,33 +194,80 @@ def is_outside_uae_query(query: str) -> bool:
     return any(location in query for location in non_uae_locations)
 
 def extract_user_preferences_from_conversation(messages: List[Dict[str, str]]) -> Dict[str, Any]:
-    """Extract user preferences from conversation history"""
+    """Extract user preferences from conversation history with enhanced location tracking"""
     preferences = {}
+    import re
     for message in messages:
         if message["role"] == "user":
             content = message["content"].lower()
-            # Extract location preferences
-            if any(location in content for location in ["dubai", "abu dhabi", "sharjah", "ajman"]):
-                if "dubai" in content:
-                    preferences["emirate"] = "dubai"
-                elif "abu dhabi" in content:
-                    preferences["emirate"] = "abu dhabi"
-                elif "sharjah" in content:
-                    preferences["emirate"] = "sharjah"
+            
+            # Enhanced location extraction with more emirates and communities
+            uae_emirates = {
+                "dubai": "dubai", "abu dhabi": "abu dhabi", "sharjah": "sharjah", 
+                "ajman": "ajman", "fujairah": "fujairah", "ras al khaimah": "ras al khaimah",
+                "umm al quwain": "umm al quwain"
+            }
+            
+            # Check for emirate mentions
+            for location_key, emirate_value in uae_emirates.items():
+                if location_key in content:
+                    preferences["emirate"] = emirate_value
+                    break
+            
+            # Extract specific communities (more comprehensive)
+            communities = [
+                "dubai marina", "downtown dubai", "jumeirah", "business bay", "jlt", 
+                "jvc", "jbr", "palm jumeirah", "emirates hills", "arabian ranches",
+                "al reem island", "corniche", "al raha beach", "al nuaimia", "al zorah"
+            ]
+            
+            for community in communities:
+                if community in content:
+                    preferences["community"] = community
+                    break
             
             # Extract bedroom preferences
-            import re
             bed_match = re.search(r"(\d+)\s*bed(room)?s?", content)
             if bed_match:
                 preferences["number_of_bedrooms"] = int(bed_match.group(1))
             
-            # Extract budget preferences
-            budget_match = re.search(r"aed\s*(\d+)(?:k|000)?", content)
-            if budget_match:
-                budget = int(budget_match.group(1))
-                if "k" in content:
-                    budget *= 1000
-                preferences["rent_charge"] = {"lte": budget}
+            # Extract bathroom preferences
+            bath_match = re.search(r"(\d+)\s*bath(room)?s?", content)
+            if bath_match:
+                preferences["number_of_bathrooms"] = int(bath_match.group(1))
+            
+            # Enhanced budget extraction with more patterns
+            budget_patterns = [
+                r"under\s*(\d+)(?:k|000)?",  # "under 100k"
+                r"below\s*(\d+)(?:k|000)?",  # "below 100k"
+                r"less\s*than\s*(\d+)(?:k|000)?",  # "less than 100k"
+                r"max\s*(\d+)(?:k|000)?",  # "max 100k"
+                r"up\s*to\s*(\d+)(?:k|000)?",  # "up to 100k"
+                r"aed\s*(\d+)(?:k|000)?",  # "aed 100k"
+                r"(\d+)(?:k|000)?\s*aed",  # "100k aed"
+            ]
+            
+            for pattern in budget_patterns:
+                budget_match = re.search(pattern, content)
+                if budget_match:
+                    budget = int(budget_match.group(1))
+                    if "k" in content or "000" in content:
+                        budget *= 1000
+                    preferences["rent_charge"] = {"lte": budget}
+                    break
+            
+            # Extract property type preferences
+            property_types = {
+                "apartment": "apartment", "flat": "apartment", "condo": "apartment",
+                "villa": "villa", "house": "villa", "home": "villa",
+                "studio": "studio", "townhouse": "townhouse", "duplex": "duplex",
+                "penthouse": "penthouse", "office": "office"
+            }
+            
+            for type_key, type_value in property_types.items():
+                if type_key in content:
+                    preferences["property_type_id"] = type_value
+                    break
             
             # Extract furnishing preferences
             if "furnished" in content:
@@ -229,8 +276,90 @@ def extract_user_preferences_from_conversation(messages: List[Dict[str, str]]) -
                 preferences["furnishing_status"] = "unfurnished"
             elif "semi-furnished" in content:
                 preferences["furnishing_status"] = "semi-furnished"
-    
+            
+            # Extract amenity preferences
+            amenities = {
+                "pool": "swimming_pool", "gym": "gym_fitness_center", "parking": "parking",
+                "balcony": "balcony_terrace", "beach": "beach_access", "elevator": "elevators",
+                "security": "security_available", "concierge": "concierge_available",
+                "pet": "pet_friendly", "ac": "central_ac_heating", "smart": "smart_home_features"
+            }
+            
+            for amenity_key, amenity_field in amenities.items():
+                if amenity_key in content:
+                    preferences[amenity_field] = True
+                    break
     return preferences
+
+def extract_preferences_with_llm(conversation_text: str, llm_client) -> Dict[str, Any]:
+    """
+    Use LLM to extract preferences dynamically from conversation text.
+    This is the scalable approach that adapts to any property field without hardcoding.
+    """
+    prompt = f"""Extract user preferences from this conversation about UAE property leasing.
+Return ONLY a JSON object with the extracted preferences. If nothing found, return {{}}.
+
+CONVERSATION: {conversation_text}
+
+EXTRACTION RULES:
+1. LOCATION: Extract emirate, city, community, subcommunity from any UAE location mentioned
+2. BUDGET: Extract rent_charge as {{"lte": amount}} for "under/below/less than/max/up to" or {{"gte": amount}} for "above/over/at least"
+3. PROPERTY SPECS: Extract number_of_bedrooms, number_of_bathrooms, property_size, year_built
+4. PROPERTY TYPE: Map to standard types (apartment, villa, studio, townhouse, duplex, penthouse, office)
+5. FURNISHING: Extract furnishing_status (furnished, semi-furnished, unfurnished)
+6. AMENITIES: Extract boolean amenities (pool, gym, parking, balcony, beach, elevator, security, concierge, pet_friendly, central_ac_heating, smart_home_features, etc.)
+7. LEASE TERMS: Extract lease_duration, payment_terms, sublease_allowed
+8. DATES: Extract available_from, lease_start_date, lease_end_date
+9. VERIFICATION: Extract bnb_verification_status, premiumBoostingStatus, carouselBoostingStatus
+
+IMPORTANT:
+- Convert all amounts to numbers (e.g., "100k" = 100000)
+- Use lowercase for text fields
+- Only include explicitly mentioned preferences
+- Be conservative - don't assume preferences not clearly stated
+
+Output JSON:"""
+
+    try:
+        response = llm_client.generate(prompt).strip()
+        
+        # Parse JSON response
+        import json
+        import re
+        
+        # Try to extract JSON from response
+        json_match = re.search(r'\{.*\}', response, re.DOTALL)
+        if json_match:
+            return json.loads(json_match.group(0))
+        
+        return {}
+        
+    except Exception:
+        return {}
+
+def extract_user_preferences_hybrid(messages: List[Dict[str, str]], llm_client=None) -> Dict[str, Any]:
+    """
+    Hybrid approach: Use LLM for intelligent extraction with regex fallback.
+    This provides the best of both worlds - scalability and reliability.
+    """
+    if not messages:
+        return {}
+    
+    # Get recent user messages
+    user_messages = [msg["content"] for msg in messages if msg["role"] == "user"][-3:]
+    if not user_messages:
+        return {}
+    
+    conversation_text = " ".join(user_messages)
+    
+    # Try LLM extraction first if client is available
+    if llm_client:
+        llm_preferences = extract_preferences_with_llm(conversation_text, llm_client)
+        if llm_preferences:
+            return llm_preferences
+    
+    # Fallback to regex-based extraction for critical fields
+    return extract_user_preferences_from_conversation(messages)
 
 class LLMClient(BaseLLM):
     def __init__(self, config: LLMConfig, api_key: Optional[str]) -> None:

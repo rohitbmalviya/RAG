@@ -8,7 +8,7 @@ from .chunking import chunk_documents
 from .config import Settings, get_settings
 from .core.base import BaseEmbedder, BaseVectorStore, BaseLLM
 from .loader import load_documents, load_document_by_id
-from .llm import filter_retrieved_chunks, is_property_query
+from .llm import filter_retrieved_chunks, is_property_query, extract_user_preferences_hybrid
 from .models import RetrievedChunk
 from .retriever import Retriever
 from .utils import get_logger
@@ -132,12 +132,19 @@ async def query_endpoint(request: QueryRequest) -> QueryResponse:
     if not request.query or not request.query.strip():
         raise HTTPException(status_code=400, detail="Query must not be empty")
     
-    # Get or create session
+    # Get or create session with proper LLM client initialization
     session_id = request.session_id or "default"
     if session_id not in conversation_sessions:
-        conversation_sessions[session_id] = pipeline_state.llm_client
+        # Create a new LLM client instance for this session
+        from .factories import build_llm
+        llm_client = build_llm(pipeline_state.settings.llm, fallback_api_key=pipeline_state.settings.embedding.api_key)
+        conversation_sessions[session_id] = llm_client
+    else:
+        llm_client = conversation_sessions[session_id]
     
-    llm_client = conversation_sessions[session_id]
+    # Update user preferences from conversation before processing query using hybrid approach
+    preferences = extract_user_preferences_hybrid(llm_client.conversation.get_messages(), llm_client)
+    llm_client.conversation.update_preferences(preferences)
     
     normalized_query, filters = preprocess_query(request.query, llm_client)
     

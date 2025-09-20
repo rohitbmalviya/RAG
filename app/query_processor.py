@@ -247,11 +247,241 @@ Output JSON:"""
     
     return result
 
+def extract_filters_with_llm_context_aware(query: str, llm_client: LLMClient) -> Dict[str, Any]:
+    """
+    Extract filters using LLM with conversation context awareness.
+    This function uses dynamic configuration and scales to any property schema.
+    """
+    settings = get_settings()
+    allowed_fields: List[str] = list(settings.retrieval.filter_fields or [])
+    field_types: Dict[str, str] = dict(settings.database.field_types or {})
+
+    # Get conversation context
+    conversation_context = _get_conversation_context(llm_client)
+    user_preferences = _get_user_preferences(llm_client)
+    
+    # First, apply basic regex extraction for simple patterns
+    filters = extract_basic_filters(query, llm_client)
+
+    # Get dynamic field mappings from configuration
+    field_mappings = _get_dynamic_field_mappings(settings)
+    
+    # Build dynamic prompt based on actual schema
+    prompt = _build_dynamic_extraction_prompt(conversation_context, user_preferences, field_mappings, query)
+
+    raw = llm_client.generate(prompt).strip()
+    
+    def _safe_json_parse(text: str) -> Dict[str, Any]:
+        """Safely parse JSON with multiple fallback strategies."""
+        try:
+            return json.loads(text)
+        except Exception:
+            pass
+        return {}
+
+    def _json_from_text(text: str) -> Dict[str, Any]:
+        # Try direct JSON parsing first
+        result = _safe_json_parse(text)
+        if result:
+            return result
+        
+        # Strip common markdown code fences
+        if text.startswith("```") and text.endswith("```"):
+            inner = text.strip().strip("`")
+            # handle ```json ... ```
+            lines = inner.split("\n", 1)
+            if len(lines) == 2 and lines[0].strip().lower().startswith("json"):
+                result = _safe_json_parse(lines[1])
+                if result:
+                    return result
+        
+        # Fallback: best-effort find first JSON object
+        import re as _re
+        m = _re.search(r"\{[\s\S]*\}", text)
+        if m:
+            result = _safe_json_parse(m.group(0))
+            if result:
+                return result
+        
+        return {}
+
+    llm_data = _json_from_text(raw)
+
+    # Merge hybrid filters with LLM results (LLM takes precedence for conflicts)
+    result = filters.copy()
+    
+    def _normalize_string_value(value: Any, field_type: str) -> Any:
+        """Normalize string values based on field type."""
+        if not isinstance(value, (str, list)):
+            return value
+        
+        if isinstance(value, str):
+            value = value.strip()
+            if field_type in ("keyword", "text"):
+                return value.lower()
+            return value
+        elif isinstance(value, list):
+            if field_type in ("keyword", "text"):
+                return [str(item).lower() for item in value]
+            return value
+        return value
+
+    # Process LLM results and merge
+    for key, value in llm_data.items():
+        if key not in allowed_fields:
+            continue
+        ftype = field_types.get(key, "")
+        normalized_value = _normalize_string_value(value, ftype)
+        coerced = _coerce_value_by_type(normalized_value, ftype)
+        if coerced is not None:
+            result[key] = coerced
+    
+    # Filter to only allowed fields
+    result = {k: v for k, v in result.items() if k in allowed_fields}
+    
+    return result
+
+def _get_conversation_context(llm_client: LLMClient) -> str:
+    """Get recent conversation context for better filter extraction."""
+    if not hasattr(llm_client, 'conversation'):
+        return ""
+    
+    messages = llm_client.conversation.get_messages()
+    if not messages:
+        return ""
+    
+    # Get last 4 messages (2 user + 2 assistant) for context
+    recent_messages = messages[-4:]
+    context_parts = []
+    
+    for msg in recent_messages:
+        if msg["role"] == "user":
+            content = msg["content"][:100] + "..." if len(msg["content"]) > 100 else msg["content"]
+            context_parts.append(f"User: {content}")
+        elif msg["role"] == "assistant":
+            # Extract key information from assistant responses
+            content = msg["content"][:150] + "..." if len(msg["content"]) > 150 else msg["content"]
+            context_parts.append(f"Assistant: {content}")
+    
+    return " | ".join(context_parts)
+
+def _get_user_preferences(llm_client: LLMClient) -> Dict[str, Any]:
+    """Get user preferences from conversation history."""
+    if not hasattr(llm_client, 'conversation'):
+        return {}
+    
+    return llm_client.conversation.get_preferences()
+
+def _build_context_section(conversation_context: str, user_preferences: Dict[str, Any]) -> str:
+    """Build context section for the LLM prompt."""
+    context_sections = []
+    
+    if conversation_context:
+        context_sections.append(f"CONVERSATION HISTORY:\n{conversation_context}")
+    
+    if user_preferences:
+        pref_items = []
+        for key, value in user_preferences.items():
+            if isinstance(value, dict) and "lte" in value:
+                pref_items.append(f"{key}: up to {value['lte']}")
+            elif isinstance(value, dict) and "gte" in value:
+                pref_items.append(f"{key}: at least {value['gte']}")
+            else:
+                pref_items.append(f"{key}: {value}")
+        if pref_items:
+            context_sections.append(f"USER PREFERENCES: {', '.join(pref_items)}")
+    
+    if context_sections:
+        return "\n\n".join(context_sections) + "\n\n"
+    
+    return ""
+
+def _get_dynamic_field_mappings(settings) -> Dict[str, str]:
+    """
+    Get field mappings dynamically from configuration.
+    This makes the system scalable to any property schema.
+    """
+    field_types = settings.database.field_types or {}
+    filter_fields = settings.retrieval.filter_fields or []
+    
+    # Build dynamic mappings based on configuration
+    mappings = {}
+    
+    for field in filter_fields:
+        field_type = field_types.get(field, "keyword")
+        mappings[field] = field_type
+    
+    return mappings
+
+def _build_dynamic_extraction_prompt(conversation_context: str, user_preferences: Dict[str, Any], 
+                                   field_mappings: Dict[str, str], query: str) -> str:
+    """
+    Build a dynamic extraction prompt based on the actual database schema.
+    This approach scales to any property field configuration.
+    """
+    context_section = _build_context_section(conversation_context, user_preferences)
+    
+    # Build field descriptions dynamically
+    field_descriptions = []
+    for field, field_type in field_mappings.items():
+        if field_type in ("integer", "float"):
+            field_descriptions.append(f"- {field} ({field_type}): number or range object {{'gte'|'lte'|'gt'|'lt'}}")
+        elif field_type == "boolean":
+            field_descriptions.append(f"- {field} (boolean): true/false if explicitly implied")
+        else:
+            field_descriptions.append(f"- {field} ({field_type}): string or list of strings")
+    
+    prompt = f"""Extract property search filters from the user query for a UAE property RAG system.
+Return ONLY a JSON object, no prose. If nothing found, return {{}}.
+
+{context_section}
+
+AVAILABLE FIELDS (dynamically configured):
+{chr(10).join(field_descriptions)}
+
+=== DYNAMIC EXTRACTION GUIDE ===
+
+🏢 LOCATION FILTERS:
+- Extract any UAE emirate, city, community, or subcommunity mentioned
+- Examples: "Dubai Marina" → {{"emirate":"dubai", "community":"dubai marina"}}
+
+💰 FINANCIAL FILTERS:
+- Extract rent_charge, security_deposit, maintenance_charge as range objects
+- Examples: "under 100k" → {{"rent_charge":{{"lte":100000}}}}
+
+🛏️ PROPERTY SPECS:
+- Extract number_of_bedrooms, number_of_bathrooms, property_size, year_built
+- Examples: "2 bedroom" → {{"number_of_bedrooms":2}}
+
+🪑 FURNISHING & STATUS:
+- Extract furnishing_status, property_status, rent_type, maintenance_covered_by
+- Examples: "furnished" → {{"furnishing_status":"furnished"}}
+
+⭐ VERIFICATION & BOOSTING:
+- Extract bnb_verification_status, premiumBoostingStatus, carouselBoostingStatus
+- Examples: "verified" → {{"bnb_verification_status":"verified"}}
+
+🏊 AMENITIES (Boolean fields):
+- Extract any boolean amenity fields mentioned
+- Examples: "pool" → {{"swimming_pool":true}}
+
+📅 DATE FILTERS:
+- Extract date fields as range objects
+- Examples: "available from Jan 2025" → {{"available_from":{{"gte":"2025-01-01"}}}}
+
+User Query: {query}
+
+Output JSON:"""
+    
+    return prompt
+
 def preprocess_query(query: str, llm_client: LLMClient) -> Tuple[str, Dict[str, Any]]:
     """
     Preprocess query using LLM-only filter extraction restricted to configured fields.
+    Now includes conversation context for better filter extraction.
     """
-    filters = extract_filters_with_llm(query, llm_client)
+    # Extract filters with conversation context
+    filters = extract_filters_with_llm_context_aware(query, llm_client)
     
     def _add_best_property_boosts(filters: Dict[str, Any]) -> None:
         """Add verification and boosting filters for best property queries."""

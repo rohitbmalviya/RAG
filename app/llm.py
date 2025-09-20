@@ -408,7 +408,10 @@ class LLMClient(BaseLLM):
                         return response
                 except Exception as e:
                     self._logger.warning(f"Failed to retrieve alternative properties: {e}")
-                    continue
+                    return (
+                        "I encountered an issue while searching for alternative properties. "
+                        "Let me try a different approach or you can adjust your search criteria."
+                    )
             
             return (
                 "Let me search for alternative properties based on your preferences. "

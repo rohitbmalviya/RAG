@@ -73,16 +73,6 @@ class DeleteResponse(BaseModel):
     status: str
     deleted: int
 
-class RequirementRequest(BaseModel):
-    user_query: str
-    preferences: Dict[str, Any]
-    conversation_summary: str
-    session_id: Optional[str] = None
-
-class RequirementResponse(BaseModel):
-    status: str
-    message: str
-
 class PipelineState:
     settings: Optional[Settings] = None
     embedder_client: Optional[BaseEmbedder] = None
@@ -275,27 +265,6 @@ async def delete_vectors_by_id(property_id: str) -> DeleteResponse:
         logger.error("Failed to delete vectors for %s: %s", property_id, exc)
         raise HTTPException(status_code=500, detail="Failed to delete vectors")
     return DeleteResponse(status="ok", deleted=deleted)
-
-@app.post("/requirements", response_model=RequirementResponse)
-async def requirements_endpoint(request: RequirementRequest) -> RequirementResponse:
-    """Endpoint to save user requirements"""
-    try:
-        # In a real implementation, you would save this to a database
-        # For now, we'll just log it
-        logger.info(f"User requirement saved: {request.user_query}")
-        logger.info(f"Preferences: {request.preferences}")
-        logger.info(f"Conversation summary: {request.conversation_summary}")
-        
-        return RequirementResponse(
-            status="success",
-            message="Requirements saved successfully. Our team will work with agencies to find matching properties."
-        )
-    except Exception as exc:
-        logger.error(f"Failed to save requirements: {exc}")
-        return RequirementResponse(
-            status="error",
-            message="Failed to save requirements. Please try again later."
-        )
 
 @app.get("/health")
 async def health() -> Dict[str, Any]:

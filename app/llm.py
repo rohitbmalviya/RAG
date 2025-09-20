@@ -8,49 +8,6 @@ from .models import RetrievedChunk
 from .utils import get_logger
 
 
-def format_chunk_metadata(chunk: RetrievedChunk, embed_cols: List[str], idx: int) -> str:
-    meta = chunk.metadata or {}
-    table = meta.get("table") or ""
-    identifier = meta.get("id") or meta.get("source_id") or ""
-    lines = [f"[Source {idx}] table={table} id={identifier}"]
-    for col in embed_cols:
-        if col in meta and meta[col] is not None:
-            lines.append(f"{col}: {meta[col]}")
-    return "\n".join(lines)
-
-
-def build_prompt(user_query: str, chunks: List[RetrievedChunk], include_sources: bool = False) -> str:
-    """Builds a structured prompt for the LLM using retrieved chunks."""
-    settings = get_settings()
-    embed_cols = settings.database.embedding_columns or [
-        c for c in settings.database.columns if c != settings.database.id_column
-    ]
-    context_lines: List[str] = []
-    for idx, chunk in enumerate(chunks, start=1):
-        context_lines.append(format_chunk_metadata(chunk, embed_cols, idx))
-        if chunk.text:
-            context_lines.append(chunk.text)
-        context_lines.append("")
-
-    context_block = "\n".join(context_lines)
-    instructions = (
-        "You are a helpful property leasing assistant.\n"
-        "- If the user query is vague, ask one friendly clarifying question at a time "
-        "(e.g., location, budget, number of bedrooms).\n"
-        "- If sufficient details are provided, answer using retrieved property context ONLY.\n"
-        "- Do not fabricate property details if context does not match.\n"
-        "- If no relevant properties are found, politely say so and ask the next best clarifying question.\n"
-        "- Always keep responses conversational and human-like.\n"
-    )
-    
-    if include_sources:
-        instructions += "- At the end of factual property answers, list sources as 'Sources:' followed by table and id."
-    else:
-        instructions += "- Do not include sources or IDs. Just answer naturally based on the context."
-
-    return f"Instructions:\n{instructions}\n\nUser question:\n{user_query}\n\nContext:\n{context_block}\n\nAnswer:"
-
-
 def filter_retrieved_chunks(chunks: List[RetrievedChunk], min_score: float = 0.7) -> List[RetrievedChunk]:
     """Filter chunks based on relevance score (if available)."""
     return [c for c in chunks if getattr(c, "score", 1.0) >= min_score]
@@ -1005,35 +962,6 @@ class LLMClient(BaseLLM):
         """Fallback for BaseLLM compatibility."""
         return self._safe_generate([{"role": "user", "content": prompt}])
 
-    def gather_requirements(self, user_input: str) -> str:
-        """Gather user requirements and send to endpoint"""
-        from .requirement_gatherer import RequirementGatherer
-        
-        preferences = self.conversation.get_preferences()
-        gatherer = RequirementGatherer()
-        
-        result = gatherer.gather_requirements(
-            user_query=user_input,
-            preferences=preferences,
-            conversation_summary=self._summarize_conversation(),
-            session_id=str(id(self.conversation))
-        )
-        
-        if result["status"] == "success":
-            self.conversation.set_requirement_gathered(True)
-            return result["message"]
-        else:
-            return result["message"]
-
-    def _summarize_conversation(self) -> str:
-        """Summarize the conversation for requirement gathering"""
-        messages = self.conversation.get_messages()
-        if not messages:
-            return "No conversation history available."
-        
-        # Simple summarization - in production, you might want to use LLM for this
-        user_messages = [msg["content"] for msg in messages if msg["role"] == "user"]
-        return f"User discussed: {'; '.join(user_messages[-5:])}"  # Last 5 user messages
 
     def _safe_generate(self, messages: List[Dict[str, str]], retries: int = 2, delay: int = 1) -> str:
         """Call provider safely with retry logic."""

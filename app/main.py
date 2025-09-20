@@ -3,13 +3,12 @@ import os
 from typing import Any, Dict, List, Optional
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from pydantic import BaseModel
-
 from .query_processor import preprocess_query
 from .chunking import chunk_documents
 from .config import Settings, get_settings
 from .core.base import BaseEmbedder, BaseVectorStore, BaseLLM
 from .loader import load_documents, load_document_by_id
-from .llm import build_prompt, filter_retrieved_chunks, is_property_query
+from .llm import filter_retrieved_chunks, is_property_query
 from .models import RetrievedChunk
 from .retriever import Retriever
 from .utils import get_logger
@@ -31,17 +30,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-def main() -> None:
-    initialize_components()
-    if not (pipeline_state.embedder_client and pipeline_state.retriever_client and pipeline_state.llm_client):
-        raise RuntimeError("Pipeline not initialized")
-    sample_query = "What does the dataset say about pricing?"
-    chunks: List[RetrievedChunk] = pipeline_state.retriever_client.retrieve(sample_query)
-    prompt = build_prompt(sample_query, chunks)
-    answer = pipeline_state.llm_client.generate(prompt)
-    logger.info("Answer: %s", answer)
-    for idx, c in enumerate(chunks[:5], start=1):
-        logger.info("Source %s: score=%.3f id=%s", idx, c.score, c.metadata.get("id"))
 
 class QueryRequest(BaseModel):
     query: str
@@ -59,8 +47,7 @@ class QueryResponse(BaseModel):
 
 class IngestRequest(BaseModel):
     rebuild_index: bool = False
-    batch_size: Optional[int] = None  
-    parallel: Optional[bool] = None
+    batch_size: Optional[int] = None
     source_type: Optional[str] = None
     source_path: Optional[str] = None
 
@@ -121,7 +108,6 @@ def initialize_components() -> None:
     pipeline_state.retriever_client = retriever
     pipeline_state.llm_client = llm
 
-
 @app.on_event("startup")
 async def on_startup() -> None:
     initialize_components()
@@ -133,7 +119,6 @@ async def on_startup() -> None:
             pipeline_state.index_ready = True
         except Exception as exc:
             logger.warning("Failed eager index init: %s", exc)
-
 
 @app.post("/query", response_model=QueryResponse)
 async def query_endpoint(request: QueryRequest) -> QueryResponse:
@@ -211,7 +196,6 @@ def _run_ingestion(batch_size: int, rebuild_index: bool) -> None:
         logger.info("Upserted %s chunks (errors=%s)", success, errors)
         logger.info("Ingested totals rows=%s chunks=%s indexed=%s errors=%s", total_rows, total_chunks, total_indexed, total_errors)
 
-
 @app.post("/ingest")
 async def ingest_endpoint(request: IngestRequest, background_tasks: BackgroundTasks) -> Dict[str, Any]:
     if not pipeline_state.settings:
@@ -223,7 +207,6 @@ async def ingest_endpoint(request: IngestRequest, background_tasks: BackgroundTa
     batch_size = request.batch_size or pipeline_state.settings.ingestion.batch_size
     background_tasks.add_task(_run_ingestion, batch_size=batch_size, rebuild_index=request.rebuild_index)
     return {"status": "started", "batch_size": batch_size, "rebuild_index": request.rebuild_index}
-
 
 @app.post("/ingest/{property_id}", response_model=UpsertOneResponse)
 async def ingest_single_property(property_id: str) -> UpsertOneResponse:

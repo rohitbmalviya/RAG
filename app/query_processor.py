@@ -2,7 +2,6 @@ from __future__ import annotations
 from typing import Dict, Tuple, Any, List
 import re
 import json
-from .models import RetrievedChunk
 from .llm import LLMClient
 from .config import get_settings
 

@@ -90,9 +90,6 @@ database:
     - developer_name
     - floor_level
     - apartment_unit_number
-    - payment_terms
-    - setup_grace_period
-    - lease_duration
 
   # ✅ Filters for structured fields
   field_types:
@@ -104,9 +101,6 @@ database:
     developer_name: text
     floor_level: text
     apartment_unit_number: text
-    payment_terms: text
-    setup_grace_period: text
-    lease_duration: text
 
     # Location fields
     emirate: keyword
@@ -186,7 +180,7 @@ chunking:
 
 embedding:
   provider: google
-  model: gemini-embedding-001  # Explicitly set to gemini-embedding-001
+  model: gemini-embedding-001 # Explicitly set to gemini-embedding-001
   api_key: ${LLM_MODEL_API_KEY}
   batch_size: 64
 
@@ -199,7 +193,7 @@ vector_db:
   index: rag_properties
   similarity: cosine
   refresh_on_write: false
-  dims: 768  # Correct dimensions for gemini-embedding-001
+  dims: 3072 # Correct dimensions for gemini-embedding-001 (default)
   mapping_properties_key: properties
 
 retrieval:

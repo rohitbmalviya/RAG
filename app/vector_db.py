@@ -47,7 +47,7 @@ class VectorStoreClient(BaseVectorStore):
         settings = get_settings()
         columns = list(settings.database.columns)
         filter_fields = list(settings.retrieval.filter_fields)
-        field_types = settings.vector_db.field_types or {}
+        field_types = settings.database.field_types or {}
         return columns, filter_fields, field_types
 
     def _get_index_name(self) -> str:

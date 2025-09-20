@@ -529,11 +529,6 @@ class LLMClient(BaseLLM):
 
     def _build_context_prompt(self, user_input: str, retrieved_chunks: List[RetrievedChunk]) -> str:
         """Build a context-aware prompt for property queries with conversation memory (Step 8)"""
-        settings = get_settings()
-        embed_cols = settings.database.embedding_columns or [
-            c for c in settings.database.columns if c != settings.database.id_column
-        ]
-        
         # Get conversation context for short-term memory
         conversation_history = self._get_conversation_context()
         user_preferences = self.conversation.get_preferences()

@@ -281,7 +281,6 @@ def load_documents(settings: Settings, batch_size: int) -> Generator[List[Docume
     sql_cols = [c for c in cols if c not in image_meta_cols]
     quoted_id_col = f'"{id_col}"'
     quoted_cols = [f'"{c}"' for c in sql_cols]
-    select_cols = ", ".join([quoted_id_col] + quoted_cols)
     source_type = (settings.ingestion.source_type or "sql").lower()
     source_path = settings.ingestion.source_path
     if source_type == "sql":

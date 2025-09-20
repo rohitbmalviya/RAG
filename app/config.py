@@ -2,7 +2,7 @@ from __future__ import annotations
 import os
 import re
 from functools import lru_cache
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 import yaml
 from pydantic import BaseModel, Field
 from .utils import get_logger
@@ -129,6 +129,7 @@ class LLMConfig(BaseModel):
     model: Optional[str] = None
     temperature: Optional[float] = None
     max_output_tokens: Optional[int] = None
+    requirement_gathering: Optional[RequirementGatheringConfig] = None
 
 class IngestionConfig(BaseModel):
     batch_size: Optional[int] = None
@@ -144,6 +145,22 @@ class AppConfig(BaseModel):
 class LoggingConfig(BaseModel):
     level: Optional[str] = None
 
+class RequirementGatheringConfig(BaseModel):
+    endpoint: Optional[str] = None
+    enabled: Optional[bool] = None
+    auto_save_on_conversation_end: Optional[bool] = None
+    ask_user_confirmation: Optional[bool] = None
+    priority_fields: Optional[List[str]] = None
+
+class FallbackConfig(BaseModel):
+    enable: Optional[bool] = None
+    strategy: Optional[List[str]] = None
+    requirement_capture: Optional[Dict[str, Any]] = None
+
+class MemoryConfig(BaseModel):
+    type: Optional[str] = None
+    strategy: Optional[Dict[str, Any]] = None
+
 class Settings(BaseModel):
     app: AppConfig = Field(default_factory=AppConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
@@ -154,6 +171,9 @@ class Settings(BaseModel):
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     ingestion: IngestionConfig = Field(default_factory=IngestionConfig)
+    requirement_gathering: RequirementGatheringConfig = Field(default_factory=RequirementGatheringConfig)
+    fallback: FallbackConfig = Field(default_factory=FallbackConfig)
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
 
 def load_yaml_config(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
@@ -198,6 +218,12 @@ def get_settings(config_path: Optional[str] = None) -> Settings:
         except Exception as exc:
             logger.warning("Failed to parse DATABASE_URL: %s", exc)    
     _apply_nested_env_overrides(cfg)
+    
+    # Move requirement_gathering from root to llm section if it exists
+    if "requirement_gathering" in cfg and "llm" in cfg:
+        cfg["llm"]["requirement_gathering"] = cfg["requirement_gathering"]
+        del cfg["requirement_gathering"]
+    
     settings = Settings(**cfg)
     if not settings.embedding.api_key:
         settings.embedding.api_key = os.getenv("LLM_MODEL_API_KEY")

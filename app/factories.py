@@ -1,5 +1,4 @@
 from __future__ import annotations
-from typing import Dict, Type
 from .config import EmbeddingConfig, LLMConfig, VectorDBConfig
 from .core.base import BaseEmbedder, BaseLLM, BaseVectorStore
 from .embedding import EmbeddingClient

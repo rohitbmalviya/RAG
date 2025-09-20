@@ -2,7 +2,7 @@ from __future__ import annotations
 from typing import Any, Callable, Dict, List, Optional, Type
 import time
 import requests
-from .config import LLMConfig, get_settings
+from .config import LLMConfig
 from .core.base import BaseLLM
 from .models import RetrievedChunk
 from .utils import get_logger
@@ -834,7 +834,7 @@ class LLMClient(BaseLLM):
         
         if not messages:
             return "No conversation history available."
-            
+        
         # Extract key conversation points
         user_messages = [msg["content"] for msg in messages if msg["role"] == "user"]
         
@@ -895,10 +895,9 @@ class LLMClient(BaseLLM):
     
     def _send_requirements_to_endpoint(self, requirements: Dict[str, Any]) -> str:
         """Send requirements to the backend endpoint"""
-        import requests
         import time
         
-        endpoint = "http://localhost:5000/backend/api/v1/user/requirement"
+        endpoint = self._config.requirement_gathering.endpoint or "http://localhost:5000/backend/api/v1/user/requirement"
         
         try:
             response = requests.post(

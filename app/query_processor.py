@@ -8,38 +8,63 @@ from .config import get_settings
 
 # Controlled vocabularies
 PROPERTY_TYPES = {
-    "apartment": "Apartment",
-    "villa": "Villa",
-    "studio": "Studio",
-    "duplex": "Duplex",
-    "penthouse": "Penthouse",
-    "office": "Office",
+    "apartment": "apartment",
+    "apartments": "apartment", 
+    "villa": "villa",
+    "villas": "villa",
+    "studio": "studio",
+    "studios": "studio",
+    "duplex": "duplex",
+    "penthouse": "penthouse",
+    "townhouse": "townhouse",
+    "townhouses": "townhouse",
+    "house": "house",
+    "houses": "house",
+    "condo": "apartment",
+    "condos": "apartment",
+    "flat": "apartment",
+    "flats": "apartment",
+    "office": "office",
 }
 
 BOOSTING_KEYWORDS = {
     "verified": ("bnb_verification_status", "verified"),
-    "premium": ("premiumBoostingStatus", "active"),
-    "prime": ("carouselBoostingStatus", "active"),
+    "premium": ("premiumBoostingStatus", "Active"),  # Fixed: Should be "Active" not "active"
+    "prime": ("carouselBoostingStatus", "Active"),   # Fixed: Should be "Active" not "active"
+}
+
+# Common property type and amenity mappings (keep these as they're standard)
+AMENITY_KEYWORDS = {
+    "pet-friendly": "pet_friendly",
+    "pet friendly": "pet_friendly", 
+    "gym": "gym_fitness_center",
+    "fitness": "gym_fitness_center",
+    "pool": "swimming_pool",
+    "swimming pool": "swimming_pool",
+    "parking": "parking",
+    "balcony": "balcony_terrace",
+    "terrace": "balcony_terrace",
+    "beach access": "beach_access",
+    "beach": "beach_access",
+    "elevator": "elevators",
+    "lift": "elevators",
+    "security": "security_available",
+    "concierge": "concierge_available",
+    "maid": "maids_room",
+    "laundry": "laundry_room",
+    "storage": "storage_room",
+    "bbq": "bbq_area",
+    "central ac": "central_ac_heating",
+    "ac": "central_ac_heating",
+    "smart home": "smart_home_features",
+    "jogging": "jogging_cycling_tracks",
+    "cycling": "jogging_cycling_tracks",
+    "mosque": "mosque_nearby",
+    "chiller": "chiller_included",
 }
 
 
-def extract_rent_with_llm(query: str, llm_client: LLMClient) -> int | None:
-    """
-    Use LLM to extract the maximum rent value from a query.
-    Converts shorthand like '10K', '2M', 'AED 15k' into integer (AED).
-    """
-    prompt = (
-        "Extract the maximum rent value from this UAE property search query. "
-        "Return only a number in AED. Convert 'K' to thousand, 'M' to million. "
-        "If no rent specified, return None.\n\n"
-        f"Query: {query}"
-    )
-    raw = llm_client.generate(prompt).strip()
-    try:
-        rent_value = int(raw.replace(",", "").replace(" ", ""))
-        return rent_value
-    except Exception:
-        return None
+# Removed extract_rent_with_llm - now handled by comprehensive LLM extraction
 
 
 def extract_location_with_llm(query: str, llm_client: LLMClient) -> Dict[str, Any]:
@@ -62,6 +87,27 @@ def extract_location_with_llm(query: str, llm_client: LLMClient) -> Dict[str, An
         pass
     return {}
 
+
+def extract_basic_filters(query: str, llm_client: LLMClient) -> Dict[str, Any]:
+    """
+    Extract only the most basic filters using regex for performance.
+    The comprehensive LLM extraction will handle everything else.
+    """
+    filters: Dict[str, Any] = {}
+    q_lower = query.lower()
+
+    # Only keep the most reliable regex patterns
+    # Bedrooms (very reliable pattern)
+    bed_match = re.search(r"(\d+)\s*bed(room)?s?", q_lower)
+    if bed_match:
+        filters["number_of_bedrooms"] = int(bed_match.group(1))
+
+    # Bathrooms (very reliable pattern)
+    bath_match = re.search(r"(\d+)\s*bath(room)?s?", q_lower)
+    if bath_match:
+        filters["number_of_bathrooms"] = int(bath_match.group(1))
+
+    return filters
 
 def extract_filters(query: str, llm_client: LLMClient) -> Dict[str, Any]:
     """
@@ -167,6 +213,9 @@ def extract_filters_with_llm(query: str, llm_client: LLMClient) -> Dict[str, Any
     allowed_fields: List[str] = list(settings.retrieval.filter_fields or [])
     field_types: Dict[str, str] = dict(settings.database.field_types or {})
 
+    # First, apply basic regex extraction for simple patterns
+    filters = extract_basic_filters(query, llm_client)
+
     schema_lines: List[str] = []
     for f in allowed_fields:
         ftype = field_types.get(f, "keyword")
@@ -177,28 +226,99 @@ def extract_filters_with_llm(query: str, llm_client: LLMClient) -> Dict[str, Any
         else:
             schema_lines.append(f"- {f} ({ftype}): string or list of strings")
 
-    prompt = (
-        "Extract property search filters from the user query for a UAE property RAG system.\n"
-        "Return ONLY a JSON object, no prose. If nothing found, return {}.\n"
-        "Include only these fields if explicitly implied (omit others):\n"
-        + "\n".join(schema_lines)
-        + "\n\nRules:\n"
-          "- Use lowercase strings for categorical values.\n"
-          "- For numbers with K/M (e.g., 120k, 1.2M), convert to AED integer/float.\n"
-          "- For ceilings like 'under 120k', output rent_charge as {\"lte\": 120000}.\n"
-          "- Map 'verified' to bnb_verification_status: 'verified'.\n"
-          "- Map 'premium' to premiumBoostingStatus: 'Active'.\n"
-          "- Map 'prime' to carouselBoostingStatus: 'Active'.\n"
-          "- Booleans like 'pet-friendly', 'gym', 'beach access' -> true.\n"
-          "- For 'best property' queries, prioritize verified and boosted properties.\n"
-          "- For location queries, map to emirate, city, community, or subcommunity.\n"
-          "- Do not invent values. If not clearly implied, omit the field.\n\n"
-        f"User query: {query}\n\nOutput JSON:"
-    )
+    prompt = f"""Extract property search filters from the user query for a UAE property RAG system.
+Return ONLY a JSON object, no prose. If nothing found, return {{}}.
+
+AVAILABLE FIELDS:
+{chr(10).join(schema_lines)}
+
+=== COMPREHENSIVE FILTER EXTRACTION GUIDE ===
+
+🏢 LOCATION FILTERS:
+- EMIRATES: dubai, abu dhabi, sharjah, ajman, fujairah, ras al khaimah, umm al quwain
+- HIERARCHY: emirate > city > community > subcommunity
+- ABBREVIATIONS: JVC→jumeirah village circle, JBR→jumeirah beach residence, JLT→jumeirah lakes towers, DIFC→dubai international financial centre
+- EXAMPLES: "Dubai Marina" → {{"emirate":"dubai", "community":"dubai marina"}}
+
+🏠 PROPERTY TYPES:
+- apartment/flat/condo → "apartment"
+- villa/house → "villa"  
+- studio → "studio"
+- townhouse → "townhouse"
+- duplex → "duplex"
+- penthouse → "penthouse"
+- office → "office"
+
+💰 FINANCIAL FILTERS:
+- RENT: "under 100k"→{{"rent_charge":{{"lte":100000}}}}, "150k-200k"→{{"rent_charge":{{"gte":150000,"lte":200000}}}}
+- SECURITY DEPOSIT: "deposit 10k"→{{"security_deposit":{{"lte":10000}}}}
+- MAINTENANCE: "maintenance 5k"→{{"maintenance_charge":{{"lte":5000}}}}
+- CONVERSIONS: K=thousand, M=million
+
+🛏️ PROPERTY SPECS:
+- BEDROOMS: "2 bedroom"→{{"number_of_bedrooms":2}}
+- BATHROOMS: "3 bathroom"→{{"number_of_bathrooms":3}}
+- SIZE: "1500 sqft"→{{"property_size":1500}}, "built 2020"→{{"year_built":2020}}
+
+🪑 FURNISHING & STATUS:
+- FURNISHING: "furnished"/"semi-furnished"/"unfurnished"
+- PROPERTY STATUS: "listed"/"active"/"draft"/"review"
+- RENT TYPE: "lease"/"holiday home ready"/"management fees"
+- MAINTENANCE: "owner"/"tenant"/"shared" (maintenance_covered_by)
+
+⭐ VERIFICATION & BOOSTING:
+- VERIFIED: "verified"→{{"bnb_verification_status":"verified"}}
+- PREMIUM: "premium"→{{"premiumBoostingStatus":"Active"}}
+- PRIME: "prime"→{{"carouselBoostingStatus":"Active"}}
+
+🏊 AMENITIES (Boolean - set to true if mentioned):
+- GYM: gym, fitness → gym_fitness_center
+- POOL: pool, swimming → swimming_pool  
+- PARKING: parking → parking
+- BALCONY: balcony, terrace → balcony_terrace
+- BEACH: beach access → beach_access
+- ELEVATOR: elevator, lift → elevators
+- SECURITY: security → security_available
+- CONCIERGE: concierge → concierge_available
+- MAID: maid room → maids_room
+- LAUNDRY: laundry → laundry_room
+- STORAGE: storage → storage_room
+- BBQ: bbq → bbq_area
+- PET: pet-friendly → pet_friendly
+- AC: central ac, air conditioning → central_ac_heating
+- SMART: smart home → smart_home_features
+- WASTE: waste disposal → waste_disposal_system
+- POWER: power backup, generator → power_backup
+- MOSQUE: mosque nearby → mosque_nearby
+- JOGGING: jogging, cycling tracks → jogging_cycling_tracks
+- CHILLER: chiller included → chiller_included
+- SUBLEASE: sublease allowed → sublease_allowed
+- CHILDREN: kids play area → childrens_play_area
+
+📅 DATE FILTERS (format as YYYY-MM-DD):
+- AVAILABLE: "available from Jan 2025"→{{"available_from":"2025-01-01"}}
+- LEASE START: "lease starts March"→{{"lease_start_date":"2025-03-01"}}
+- LEASE END: "lease ends Dec 2025"→{{"lease_end_date":"2025-12-31"}}
+
+🏗️ DEVELOPER & DETAILS:
+- DEVELOPER: "Emaar", "Nakheel", "Damac" → developer_name
+- LEASE DURATION: "1 year", "6 months", "2 years" → lease_duration
+- FLOOR: "5th floor", "ground floor" → floor_level
+
+EXTRACTION RULES:
+1. Use lowercase for all string values
+2. Only extract explicitly mentioned filters
+3. For ranges, use gte/lte: {{"field":{{"gte":min,"lte":max}}}}
+4. Boolean amenities: set to true only if clearly mentioned
+5. Dates: convert to YYYY-MM-DD format
+6. Don't invent values - only extract what's clearly stated
+
+User query: {query}
+
+Output JSON:"""
 
     raw = llm_client.generate(prompt).strip()
-    data: Dict[str, Any] = {}
-
+    
     def _json_from_text(text: str) -> Dict[str, Any]:
         try:
             return json.loads(text)
@@ -224,11 +344,13 @@ def extract_filters_with_llm(query: str, llm_client: LLMClient) -> Dict[str, Any
                 pass
         return {}
 
-    data = _json_from_text(raw)
+    llm_data = _json_from_text(raw)
 
-    # Keep only allowed fields and coerce by type
-    result: Dict[str, Any] = {}
-    for key, value in data.items():
+    # Merge hybrid filters with LLM results (LLM takes precedence for conflicts)
+    result = filters.copy()
+    
+    # Process LLM results and merge
+    for key, value in llm_data.items():
         if key not in allowed_fields:
             continue
         # Normalize categorical strings to lowercase
@@ -242,18 +364,12 @@ def extract_filters_with_llm(query: str, llm_client: LLMClient) -> Dict[str, Any
             elif isinstance(v, list):
                 v = [str(item).lower() for item in v]
         coerced = _coerce_value_by_type(v, ftype)
-        if coerced is None:
-            continue
-        result[key] = coerced
-    # Fallback to regex extraction if LLM returned empty
-    if not result:
-        try:
-            fallback = extract_filters(query, llm_client)
-            if fallback:
-                # Keep only allowed fields
-                result = {k: v for k, v in fallback.items() if k in allowed_fields}
-        except Exception:
-            pass
+        if coerced is not None:
+            result[key] = coerced
+    
+    # Filter to only allowed fields
+    result = {k: v for k, v in result.items() if k in allowed_fields}
+    
     return result
 
 

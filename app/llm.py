@@ -571,11 +571,15 @@ class LLMClient(BaseLLM):
         return response
 
     def _build_context_prompt(self, user_input: str, retrieved_chunks: List[RetrievedChunk]) -> str:
-        """Build a context-aware prompt for property queries"""
+        """Build a context-aware prompt for property queries with conversation memory (Step 8)"""
         settings = get_settings()
         embed_cols = settings.database.embedding_columns or [
             c for c in settings.database.columns if c != settings.database.id_column
         ]
+        
+        # Get conversation context for short-term memory
+        conversation_history = self._get_conversation_context()
+        user_preferences = self.conversation.get_preferences()
         
         context_lines: List[str] = []
         for idx, chunk in enumerate(retrieved_chunks, start=1):
@@ -586,19 +590,73 @@ class LLMClient(BaseLLM):
 
         context_block = "\n".join(context_lines)
         
+        # Enhanced instructions for Step 8 - Interactive conversation with memory
         instructions = (
-            "You are LeaseOasis, a conversational UAE property leasing assistant.\n"
-            "Core Behavior:\n"
-            "- Always sound polite, respectful, and human-like.\n"
-            "- Use the retrieved property context to answer user queries.\n"
-            "- Only provide property details when retrieved context matches the query.\n"
-            "- Never fabricate or guess property details.\n"
-            "- Always keep responses conversational and helpful.\n"
-            "- If no exact matches, suggest alternatives or ask clarifying questions.\n"
-            "- Show property details with sources for property search queries.\n"
+            "You are LeaseOasis, a conversational UAE property leasing assistant with memory.\n"
+            "\n"
+            "CORE BEHAVIOR (Step 8 Requirements):\n"
+            "- Sound like a human property expert, not a chatbot\n"
+            "- Use conversation memory to provide personalized responses\n"
+            "- Only answer about UAE properties - you have no data outside UAE\n"
+            "- Use ONLY the retrieved context for property details - never fabricate\n"
+            "- For greetings: respond warmly but keep sources empty\n"
+            "- For general property terms: explain briefly but keep sources empty\n"
+            "- For property queries: show detailed properties with sources\n"
+            "\n"
+            "CONVERSATION MEMORY:\n"
+            "- Remember user preferences from previous messages\n"
+            "- Reference earlier conversation points naturally\n"
+            "- Build on previous questions and answers\n"
+            "- Adapt responses based on user's journey\n"
+            "\n"
+            "INTERACTIVE CONVERSATION STYLE:\n"
+            "- Ask follow-up questions to understand needs better\n"
+            "- Guide users through property selection naturally\n"
+            "- Offer alternatives when exact matches aren't found\n"
+            "- Make suggestions based on conversation context\n"
+            "- Feel like talking to a knowledgeable property advisor\n"
+            "\n"
+            "SOURCES & CONTEXT:\n"
+            "- Always cite sources [Source X] for property details\n"
+            "- Show property cards with complete information\n"
+            "- Include location, price, amenities, and contact details\n"
+            "- For non-property responses, leave sources empty\n"
         )
 
-        return f"Instructions:\n{instructions}\n\nUser question:\n{user_input}\n\nContext:\n{context_block}\n\nAnswer:"
+        # Build conversation context section
+        memory_section = ""
+        if conversation_history:
+            memory_section = f"\n\nCONVERSATION MEMORY:\n{conversation_history}"
+        
+        preferences_section = ""
+        if user_preferences:
+            pref_items = []
+            for key, value in user_preferences.items():
+                if isinstance(value, dict) and "lte" in value:
+                    pref_items.append(f"{key}: up to {value['lte']}")
+                else:
+                    pref_items.append(f"{key}: {value}")
+            if pref_items:
+                preferences_section = f"\n\nUSER PREFERENCES: {', '.join(pref_items)}"
+
+        return f"Instructions:\n{instructions}{memory_section}{preferences_section}\n\nUser question:\n{user_input}\n\nProperty Context:\n{context_block}\n\nResponse:"
+
+    def _get_conversation_context(self) -> str:
+        """Get recent conversation history for short-term memory"""
+        messages = self.conversation.get_messages()
+        if not messages:
+            return ""
+            
+        # Get last 4 messages (2 user + 2 assistant) for context
+        recent_messages = messages[-4:]
+        context_parts = []
+        
+        for msg in recent_messages:
+            role = "User" if msg["role"] == "user" else "Assistant"
+            content = msg["content"][:150] + "..." if len(msg["content"]) > 150 else msg["content"]
+            context_parts.append(f"{role}: {content}")
+            
+        return " | ".join(context_parts)
 
     def _build_best_property_prompt(self, user_input: str, retrieved_chunks: List[RetrievedChunk]) -> str:
         """Build a context-aware prompt for best property queries"""

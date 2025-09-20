@@ -42,8 +42,7 @@ class Retriever:
         raw_scores: List[float] = [float(h.get("_score", 0.0)) for h in hits]
         max_score = max(raw_scores) if raw_scores else 1.0
         min_score = min(raw_scores) if raw_scores else 0.0
-        denom = (max_score - min_score) if (max_score - min_score) > 0 else 1.0
-        
+        denom = (max_score - min_score) if (max_score - min_score) > 0 else 1.0 
         for hit in hits:
             raw = float(hit.get("_score", 0.0))
             base_score = (raw - min_score) / denom
@@ -70,35 +69,59 @@ class Retriever:
         
         return chunks
 
+    def _check_metadata_condition(self, metadata: Dict[str, Any], field: str, expected_value: str) -> bool:
+        """Check if metadata field matches expected value."""
+        return metadata.get(field) == expected_value
+
+    def _check_filter_match(self, metadata: Dict[str, Any], filters: Dict[str, Any], field: str) -> bool:
+        """Check if metadata field matches filter value."""
+        return field in filters and metadata.get(field) == filters[field]
+
+    def _calculate_location_score(self, metadata: Dict[str, Any], filters: Dict[str, Any], location_scores: List[tuple[str, float]]) -> float:
+        """Calculate location match score based on emirate, city, and community."""
+        location_match = 0.0
+        for field, score in location_scores:
+            if self._check_filter_match(metadata, filters, field):
+                location_match += score
+        return location_match
+
     def _calculate_priority_score(self, metadata: Dict[str, Any]) -> float:
         """Calculate priority score based on verification and boosting status"""
-        priority_score = 0.0
-        
-        # Priority 1: All three conditions met (premium + prime + verified)
-        if (metadata.get("premiumBoostingStatus") == ACTIVE_STATUS and 
-            metadata.get("carouselBoostingStatus") == ACTIVE_STATUS and 
-            metadata.get("bnb_verification_status") == VERIFIED_STATUS):
-            priority_score = 0.3
-        
-        # Priority 2: Verified only
-        elif metadata.get("bnb_verification_status") == VERIFIED_STATUS:
-            priority_score = 0.2
-        
-        # Priority 3: Prime boosting only
-        elif metadata.get("carouselBoostingStatus") == ACTIVE_STATUS:
-            priority_score = 0.15
-        
-        # Priority 4: Premium boosting only
-        elif metadata.get("premiumBoostingStatus") == ACTIVE_STATUS:
-            priority_score = 0.1
-        
-        return priority_score
+        # Define priority conditions and their scores
+        priority_conditions = [
+            # Priority 1: All three conditions met (premium + prime + verified)
+            (
+                self._check_metadata_condition(metadata, "premiumBoostingStatus", ACTIVE_STATUS) and
+                self._check_metadata_condition(metadata, "carouselBoostingStatus", ACTIVE_STATUS) and
+                self._check_metadata_condition(metadata, "bnb_verification_status", VERIFIED_STATUS),
+                0.3
+            ),
+            # Priority 2: Verified only
+            (
+                self._check_metadata_condition(metadata, "bnb_verification_status", VERIFIED_STATUS),
+                0.2
+            ),
+            # Priority 3: Prime boosting only
+            (
+                self._check_metadata_condition(metadata, "carouselBoostingStatus", ACTIVE_STATUS),
+                0.15
+            ),
+            # Priority 4: Premium boosting only
+            (
+                self._check_metadata_condition(metadata, "premiumBoostingStatus", ACTIVE_STATUS),
+                0.1
+            )
+        ]
+        # Return the first matching condition's score
+        for condition, score in priority_conditions:
+            if condition:
+                return score
+        return 0.0
 
     def _calculate_attribute_priority_score(self, metadata: Dict[str, Any], filters: Optional[Dict[str, Any]]) -> float:
         """
         Calculate attribute priority score based on Step 7 requirements.
         Prioritizes context retrieval based on user preferences and attribute importance.
-        
         Priority Order (as specified in Step 7):
         1. Location (emirate, city, community) - Highest Priority
         2. Budget (rent_charge) - High Priority  
@@ -115,15 +138,13 @@ class Retriever:
         attribute_score = 0.0
         
         # 1. Location Priority (Highest - 0.25 max)
-        location_match = 0.0
-        if "emirate" in filters and metadata.get("emirate") == filters["emirate"]:
-            location_match += 0.15  # Emirate match
-        if "city" in filters and metadata.get("city") == filters["city"]:
-            location_match += 0.05  # City match
-        if "community" in filters and metadata.get("community") == filters["community"]:
-            location_match += 0.05  # Community match
+        location_scores = [
+            ("emirate", 0.15),
+            ("city", 0.05),
+            ("community", 0.05)
+        ]
+        location_match = self._calculate_location_score(metadata, filters, location_scores)
         attribute_score += location_match
-        
         # 2. Budget Priority (High - 0.15 max)
         if "rent_charge" in filters:
             filter_budget = filters["rent_charge"]
@@ -140,19 +161,19 @@ class Retriever:
                             attribute_score += 0.10
                         
         # 3. Property Type Priority (High - 0.12 max)
-        if "property_type_id" in filters and metadata.get("property_type_id") == filters["property_type_id"]:
-            attribute_score += 0.12
-            
+        if self._check_filter_match(metadata, filters, "property_type_id"):
+            attribute_score += 0.12   
         # 4. Bedrooms/Bathrooms Priority (Medium-High - 0.10 max)
-        if "number_of_bedrooms" in filters and metadata.get("number_of_bedrooms") == filters["number_of_bedrooms"]:
-            attribute_score += 0.06
-        if "number_of_bathrooms" in filters and metadata.get("number_of_bathrooms") == filters["number_of_bathrooms"]:
-            attribute_score += 0.04
-            
+        bedroom_bathroom_scores = [
+            ("number_of_bedrooms", 0.06),
+            ("number_of_bathrooms", 0.04)
+        ]
+        for field, score in bedroom_bathroom_scores:
+            if self._check_filter_match(metadata, filters, field):
+                attribute_score += score    
         # 5. Furnishing Status Priority (Medium - 0.08 max)
-        if "furnishing_status" in filters and metadata.get("furnishing_status") == filters["furnishing_status"]:
-            attribute_score += 0.08
-            
+        if self._check_filter_match(metadata, filters, "furnishing_status"):
+            attribute_score += 0.08    
         # 6. Key Amenities Priority (Medium - 0.06 max)
         amenity_matches = 0
         key_amenities = ["swimming_pool", "pet_friendly", "gym_fitness_center", "parking", "balcony_terrace"]
@@ -160,12 +181,10 @@ class Retriever:
             if amenity in filters and filters[amenity] and metadata.get(amenity):
                 amenity_matches += 1
         if amenity_matches > 0:
-            attribute_score += min(0.06, amenity_matches * 0.015)  # 0.015 per amenity match
-            
+            attribute_score += min(0.06, amenity_matches * 0.015)  # 0.015 per amenity match   
         # 7. Lease Duration Priority (Medium-Low - 0.04 max)
-        if "lease_duration" in filters and metadata.get("lease_duration") == filters["lease_duration"]:
+        if self._check_filter_match(metadata, filters, "lease_duration"):
             attribute_score += 0.04
-            
         # 8. Availability Date Priority (Low - 0.02 max)
         if "available_from" in filters:
             filter_date = filters["available_from"]
@@ -174,5 +193,4 @@ class Retriever:
                 # Simple date comparison - exact match gets points
                 if property_date <= filter_date:  # Available by requested date
                     attribute_score += 0.02
-        
         return min(0.25, attribute_score)  # Cap at 0.25 to prevent over-boosting

@@ -26,6 +26,17 @@ def extract_basic_filters(query: str, llm_client: LLMClient) -> Dict[str, Any]:
 
     return filters
 
+def _safe_convert_to_numeric(value: Any, target_type: str) -> Any:
+    """Safely convert value to integer or float with fallback."""
+    try:
+        if target_type == "integer":
+            return int(value)
+        elif target_type == "float":
+            return float(value)
+    except Exception:
+        pass
+    return value
+
 def _coerce_value_by_type(value: Any, field_type: str) -> Any:
     if value is None:
         return None
@@ -35,26 +46,13 @@ def _coerce_value_by_type(value: Any, field_type: str) -> Any:
         coerced: Dict[str, Any] = {}
         for k in ("gte", "lte", "gt", "lt"):
             if k in value and value[k] is not None:
-                try:
-                    if t == "integer":
-                        coerced[k] = int(value[k])
-                    elif t == "float":
-                        coerced[k] = float(value[k])
-                    else:
-                        coerced[k] = value[k]
-                except Exception:
+                if t in ("integer", "float"):
+                    coerced[k] = _safe_convert_to_numeric(value[k], t)
+                else:
                     coerced[k] = value[k]
         return coerced if coerced else None
-    if t == "integer":
-        try:
-            return int(value)
-        except Exception:
-            return value
-    if t == "float":
-        try:
-            return float(value)
-        except Exception:
-            return value
+    if t in ("integer", "float"):
+        return _safe_convert_to_numeric(value, t)
     if t == "boolean":
         if isinstance(value, bool):
             return value
@@ -179,29 +177,38 @@ Output JSON:"""
 
     raw = llm_client.generate(prompt).strip()
     
-    def _json_from_text(text: str) -> Dict[str, Any]:
+    def _safe_json_parse(text: str) -> Dict[str, Any]:
+        """Safely parse JSON with multiple fallback strategies."""
         try:
             return json.loads(text)
         except Exception:
             pass
+        return {}
+
+    def _json_from_text(text: str) -> Dict[str, Any]:
+        # Try direct JSON parsing first
+        result = _safe_json_parse(text)
+        if result:
+            return result
+        
         # Strip common markdown code fences
         if text.startswith("```") and text.endswith("```"):
             inner = text.strip().strip("`")
             # handle ```json ... ```
             lines = inner.split("\n", 1)
             if len(lines) == 2 and lines[0].strip().lower().startswith("json"):
-                try:
-                    return json.loads(lines[1])
-                except Exception:
-                    pass
+                result = _safe_json_parse(lines[1])
+                if result:
+                    return result
+        
         # Fallback: best-effort find first JSON object
         import re as _re
         m = _re.search(r"\{[\s\S]*\}", text)
         if m:
-            try:
-                return json.loads(m.group(0))
-            except Exception:
-                pass
+            result = _safe_json_parse(m.group(0))
+            if result:
+                return result
+        
         return {}
 
     llm_data = _json_from_text(raw)
@@ -209,21 +216,29 @@ Output JSON:"""
     # Merge hybrid filters with LLM results (LLM takes precedence for conflicts)
     result = filters.copy()
     
+    def _normalize_string_value(value: Any, field_type: str) -> Any:
+        """Normalize string values based on field type."""
+        if not isinstance(value, (str, list)):
+            return value
+        
+        if isinstance(value, str):
+            value = value.strip()
+            if field_type in ("keyword", "text"):
+                return value.lower()
+            return value
+        elif isinstance(value, list):
+            if field_type in ("keyword", "text"):
+                return [str(item).lower() for item in value]
+            return value
+        return value
+
     # Process LLM results and merge
     for key, value in llm_data.items():
         if key not in allowed_fields:
             continue
-        # Normalize categorical strings to lowercase
-        v = value
-        if isinstance(v, str):
-            v = v.strip()
         ftype = field_types.get(key, "")
-        if ftype in ("keyword", "text"):
-            if isinstance(v, str):
-                v = v.lower()
-            elif isinstance(v, list):
-                v = [str(item).lower() for item in v]
-        coerced = _coerce_value_by_type(v, ftype)
+        normalized_value = _normalize_string_value(value, ftype)
+        coerced = _coerce_value_by_type(normalized_value, ftype)
         if coerced is not None:
             result[key] = coerced
     
@@ -232,20 +247,22 @@ Output JSON:"""
     
     return result
 
-
 def preprocess_query(query: str, llm_client: LLMClient) -> Tuple[str, Dict[str, Any]]:
     """
     Preprocess query using LLM-only filter extraction restricted to configured fields.
     """
     filters = extract_filters_with_llm(query, llm_client)
     
-    # Add special handling for "best property" queries
-    if is_best_property_query(query):
-        # Prioritize verified and boosted properties
+    def _add_best_property_boosts(filters: Dict[str, Any]) -> None:
+        """Add verification and boosting filters for best property queries."""
         if "bnb_verification_status" not in filters:
             filters["bnb_verification_status"] = "verified"
         if "premiumBoostingStatus" not in filters:
             filters["premiumBoostingStatus"] = "Active"
+
+    # Add special handling for "best property" queries
+    if is_best_property_query(query):
+        _add_best_property_boosts(filters)
     
     print("filters", filters)
     return query, filters

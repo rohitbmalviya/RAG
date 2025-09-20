@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 # Constants to eliminate duplication
 SERVER_NOT_INITIALIZED = "Server not initialized"
 COMPONENTS_NOT_INITIALIZED = "Components not initialized"
+RETRIEVAL_DOCUMENT_TASK = "retrieval_document"
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -118,8 +119,8 @@ async def on_startup() -> None:
     assert pipeline_state.settings is not None
     if pipeline_state.settings.app.eager_init:
         try:
-            dims = pipeline_state.vector_store_client._config.dims if pipeline_state.vector_store_client and pipeline_state.vector_store_client._config.dims else pipeline_state.embedder_client.get_dimension()  
-            pipeline_state.vector_store_client.ensure_index(int(dims))  
+            dims = _get_vector_dimensions()
+            pipeline_state.vector_store_client.ensure_index(dims)  
             pipeline_state.index_ready = True
         except Exception as exc:
             logger.warning("Failed eager index init: %s", exc)
@@ -163,14 +164,39 @@ def _validate_components() -> None:
     if not (pipeline_state.settings and pipeline_state.embedder_client and pipeline_state.vector_store_client):
         raise RuntimeError(COMPONENTS_NOT_INITIALIZED)
 
+def _get_vector_dimensions() -> int:
+    """Get vector dimensions from config or embedder"""
+    if pipeline_state.vector_store_client and pipeline_state.vector_store_client._config.dims:
+        return int(pipeline_state.vector_store_client._config.dims)
+    return pipeline_state.embedder_client.get_dimension()
+
+def _process_documents_to_vectors(documents: List[Any], settings: Settings) -> tuple[List[Any], List[List[float]]]:
+    """Process documents through chunking and embedding pipeline"""
+    chunks = chunk_documents(
+        documents,
+        chunk_size=settings.chunking.chunk_size,
+        chunk_overlap=settings.chunking.chunk_overlap,
+        unit=settings.chunking.unit,
+    )
+    if not chunks:
+        return [], []
+    
+    texts = [c.text for c in chunks]
+    embeddings = pipeline_state.embedder_client.embed(texts, task_type=RETRIEVAL_DOCUMENT_TASK)
+    return chunks, embeddings
+
+def _upsert_chunks_to_vector_store(chunks: List[Any], embeddings: List[List[float]], refresh: bool = False) -> tuple[int, int]:
+    """Upsert chunks and embeddings to vector store"""
+    return pipeline_state.vector_store_client.upsert(chunks, embeddings, refresh=refresh)
+
 def _prepare_index(rebuild_index: bool = False) -> None:
     """Prepare the vector index with proper error handling"""
     try:
-        dims = pipeline_state.vector_store_client._config.dims if pipeline_state.vector_store_client and pipeline_state.vector_store_client._config.dims else pipeline_state.embedder_client.get_dimension()
+        dims = _get_vector_dimensions()
         if rebuild_index:
             logger.info("Rebuilding index '%s'", pipeline_state.vector_store_client._config.index)
             pipeline_state.vector_store_client.delete_index()
-        pipeline_state.vector_store_client.ensure_index(int(dims))
+        pipeline_state.vector_store_client.ensure_index(dims)
         pipeline_state.index_ready = True
     except Exception as exc:
         logger.error("Failed to prepare index: %s", exc)
@@ -186,19 +212,12 @@ def _run_ingestion(batch_size: int, rebuild_index: bool) -> None:
     total_errors = 0
     for docs_batch in load_documents(settings, batch_size=batch_size):
         logger.info("Fetched %s rows from DB", len(docs_batch))
-        chunks = chunk_documents(
-            docs_batch,
-            chunk_size=settings.chunking.chunk_size,
-            chunk_overlap=settings.chunking.chunk_overlap,
-            unit=settings.chunking.unit,
-        )
+        chunks, embeddings = _process_documents_to_vectors(docs_batch, settings)
         if not chunks:
             continue
         logger.info("Created %s chunks", len(chunks))
-        texts = [c.text for c in chunks]
-        embeddings = pipeline_state.embedder_client.embed(texts, task_type="retrieval_document")
         logger.info("Generated %s embeddings", len(embeddings))
-        success, errors = pipeline_state.vector_store_client.upsert(chunks, embeddings)
+        success, errors = _upsert_chunks_to_vector_store(chunks, embeddings)
         if success > 0 and not pipeline_state.index_ready:
             pipeline_state.index_ready = True
         total_rows += len(docs_batch)
@@ -236,15 +255,10 @@ async def ingest_single_property(property_id: str) -> UpsertOneResponse:
         raise HTTPException(status_code=404, detail="Property not found")
 
     # Chunk and embed
-    chunks = chunk_documents([doc],
-                             chunk_size=settings.chunking.chunk_size,
-                             chunk_overlap=settings.chunking.chunk_overlap,
-                             unit=settings.chunking.unit)
+    chunks, embeddings = _process_documents_to_vectors([doc], settings)
     if not chunks:
         return UpsertOneResponse(status="no_content", indexed_chunks=0, errors=0)
-    texts = [c.text for c in chunks]
-    embeddings = pipeline_state.embedder_client.embed(texts, task_type="retrieval_document")
-    success, errors = pipeline_state.vector_store_client.upsert(chunks, embeddings, refresh=True)
+    success, errors = _upsert_chunks_to_vector_store(chunks, embeddings, refresh=True)
     return UpsertOneResponse(status="ok", indexed_chunks=int(success), errors=int(errors))
 
 @app.delete("/vectors/{property_id}", response_model=DeleteResponse)

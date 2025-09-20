@@ -4,10 +4,11 @@ from tenacity import RetryError, retry, stop_after_attempt, wait_exponential
 from .config import EmbeddingConfig
 from .core.base import BaseEmbedder
 from .utils import get_logger
-
 # Constants to eliminate duplication
 GOOGLE_PROVIDER = "google"
 OPENAI_PROVIDER = "openai"
+# Common retry decorator to eliminate duplication
+EMBEDDING_RETRY = retry(wait=wait_exponential(multiplier=1, min=1, max=30), stop=stop_after_attempt(5))
 # Provider registry and decorator
 EMBEDDING_PROVIDERS: Dict[str, Type["BaseEmbeddingProvider"]] = {}
 def register_embedding_provider(name: str) -> Callable[[Type["BaseEmbeddingProvider"]], Type["BaseEmbeddingProvider"]]:
@@ -22,14 +23,31 @@ class BaseEmbeddingProvider:
         self._logger = get_logger(f"{__name__}.{self.__class__.__name__}")
         self._ensure_api_key()
         self._setup_client()
+    
     def _ensure_api_key(self) -> None:
         if not self._config.api_key:
             import os as _os
             self._config.api_key = _os.getenv("LLM_MODEL_API_KEY")
+    
     def _setup_client(self) -> None:
         # Optional for providers to implement
         pass
-    @retry(wait=wait_exponential(multiplier=1, min=1, max=30), stop=stop_after_attempt(5))
+    
+    def _check_api_key(self, provider_name: str) -> None:
+        """Check and warn about missing API key."""
+        if not self._config.api_key:
+            self._logger.warning("Embedding API key missing for %s provider", provider_name)
+    
+    def _handle_import_error(self, package_name: str, exc: Exception) -> None:
+        """Handle import errors with consistent messaging."""
+        raise RuntimeError(f"{package_name} package not available. Add it to requirements.txt") from exc
+    
+    def _handle_embedding_error(self, provider: str, method: str, exc: Exception) -> None:
+        """Handle embedding API errors with consistent messaging."""
+        self._logger.error("%s %s failed: %s", provider, method, exc)
+        raise
+    
+    @EMBEDDING_RETRY
     def _embed_single(self, text: str, task_type: Optional[str] = None) -> List[float]:
         raise NotImplementedError
 # Google Embedding Provider
@@ -39,14 +57,14 @@ class GoogleEmbedding(BaseEmbeddingProvider):
         try:
             import google.generativeai as genai  # type: ignore
         except Exception as exc:
-            raise RuntimeError("google-generativeai package not available. Add it to requirements.txt") from exc
-        if not self._config.api_key:
-            self._logger.warning("Embedding API key missing for Google provider")
-        else:
+            self._handle_import_error("google-generativeai", exc)
+        
+        self._check_api_key("Google")
+        if self._config.api_key:
             genai.configure(api_key=self._config.api_key)
         self._client = genai
 
-    @retry(wait=wait_exponential(multiplier=1, min=1, max=30), stop=stop_after_attempt(5))
+    @EMBEDDING_RETRY
     def _embed_single(self, text: str, task_type: Optional[str] = None) -> List[float]:
         kwargs = {"model": self._config.model, "content": text}
         if task_type:
@@ -54,8 +72,7 @@ class GoogleEmbedding(BaseEmbeddingProvider):
         try:
             response = self._client.embed_content(**kwargs)
         except Exception as exc:
-            self._logger.error("Google embed_content failed: %s", exc)
-            raise
+            self._handle_embedding_error("Google", "embed_content", exc)
         vector = response["embedding"] if isinstance(response, dict) else response.embedding
         return list(vector)
 # OpenAI Embedding Provider
@@ -66,18 +83,17 @@ class OpenAIEmbedding(BaseEmbeddingProvider):
         try:
             from openai import OpenAI  # type: ignore
         except Exception as exc:
-            raise RuntimeError("openai package not available. Add it to requirements.txt") from exc
-        if not self._config.api_key:
-            self._logger.warning("Embedding API key missing for provider")
+            self._handle_import_error("openai", exc)
+        
+        self._check_api_key("OpenAI")
         self._client = OpenAI(api_key=self._config.api_key)
 
-    @retry(wait=wait_exponential(multiplier=1, min=1, max=30), stop=stop_after_attempt(5))
+    @EMBEDDING_RETRY
     def _embed_single(self, text: str, task_type: Optional[str] = None) -> List[float]:
         try:
             resp = self._client.embeddings.create(model=self._config.model, input=text)
         except Exception as exc:
-            self._logger.error("OpenAI embeddings.create failed: %s", exc)
-            raise
+            self._handle_embedding_error("OpenAI", "embeddings.create", exc)
         return list(resp.data[0].embedding)
 class EmbeddingClient(BaseEmbedder):
     def __init__(self, config: EmbeddingConfig) -> None:
@@ -91,6 +107,15 @@ class EmbeddingClient(BaseEmbedder):
             self._logger.warning("Embedding model is not set; API calls may fail")
 
         self._provider_client = provider_cls(config)
+    
+    def _handle_embedding_exception(self, exc: Exception, context: str = "") -> None:
+        """Handle embedding exceptions with consistent messaging."""
+        if isinstance(exc, RetryError):
+            self._logger.error("Failed to embed text after retries: %s", exc)
+        else:
+            self._logger.error("Failed to embed text%s: %s", f" {context}" if context else "", exc)
+        raise
+    
     def embed(self, texts: List[str], task_type: Optional[str] = None) -> List[List[float]]:
         embeddings: List[List[float]] = []
         batch_size = max(1, self._config.batch_size or 1)
@@ -99,15 +124,15 @@ class EmbeddingClient(BaseEmbedder):
             for text in batch:
                 try:
                     vector = self._provider_client._embed_single(text, task_type=task_type)
-                except RetryError as exc:
-                    self._logger.error("Failed to embed text after retries: %s", exc)
-                    raise
                 except Exception as exc:
-                    self._logger.error("Failed to embed text: %s", exc)
-                    raise
+                    self._handle_embedding_exception(exc)
                 embeddings.append(vector)
         return embeddings
+    
     def get_dimension(self) -> int:
         probe = "dimension_probe"
-        vector = self._provider_client._embed_single(probe, task_type="retrieval_document")
+        try:
+            vector = self._provider_client._embed_single(probe, task_type="retrieval_document")
+        except Exception as exc:
+            self._handle_embedding_exception(exc, "for dimension probe")
         return len(vector)

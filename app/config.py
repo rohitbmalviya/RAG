@@ -19,47 +19,90 @@ def _expand_env_placeholders(text: str) -> str:
 
     return _ENV_PATTERN.sub(repl, text)
 
+def _get_project_root() -> str:
+    """Get the project root directory."""
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
+def _get_app_dir() -> str:
+    """Get the app directory (parent of current file)."""
+    return os.path.dirname(os.path.dirname(__file__))
+
+def _get_env_var(*var_names: str) -> Optional[str]:
+    """Get the first available environment variable from the list."""
+    for var_name in var_names:
+        value = os.getenv(var_name)
+        if value:
+            return value
+    return None
+
+def _build_config_path(directory: str) -> str:
+    """Build a config.yaml path for the given directory."""
+    return os.path.join(directory, "config.yaml")
+
+def _create_provider_validation(section: str) -> tuple[str, str, str, str]:
+    """Create provider validation tuple for a config section."""
+    return ("provider", "is_none_or_empty", "warning", f"{section} 'provider' not set; default 'google' will be used")
+
+def _create_model_validation(section: str, action: str) -> tuple[str, str, str, str]:
+    """Create model validation tuple for a config section."""
+    return ("model", "is_none_or_empty", "warning", f"{section} 'model' not set; {action} may fail")
+
 def _try_load_dotenv() -> None:
     """Load a .env file from project root if python-dotenv is available."""
     try:
         from dotenv import load_dotenv
-
-        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        project_root = _get_project_root()
         env_path = os.path.join(project_root, ".env")
         if os.path.exists(env_path):
             load_dotenv(env_path)
         else:
             load_dotenv()
-    except Exception:    
-        pass
+    except ImportError:
+        logger.debug("python-dotenv not available, skipping .env file loading")
+    except Exception as exc:
+        logger.warning("Failed to load .env file: %s", exc)
 
 def _coerce_value(target_example: Any, value_str: str) -> Any:
     """Coerce ENV value string to match existing config type when possible."""
+    if not value_str:
+        return value_str
+        
+    value_str = value_str.strip()
+    
     if isinstance(target_example, bool):
-        return value_str.strip().lower() in {"1", "true", "yes", "on"}
+        return value_str.lower() in {"1", "true", "yes", "on"}
+    
     if isinstance(target_example, int):
         try:
             return int(value_str)
         except ValueError:
+            logger.warning("Failed to convert '%s' to int, keeping as string", value_str)
             return value_str
+    
     if isinstance(target_example, float):
         try:
             return float(value_str)
         except ValueError:
+            logger.warning("Failed to convert '%s' to float, keeping as string", value_str)
             return value_str
+    
     if isinstance(target_example, list):
         return [item.strip() for item in value_str.split(",") if item.strip()]
-    lowered = value_str.strip().lower()
+    
+    # Fallback type detection
+    lowered = value_str.lower()
     if lowered in {"true", "false"}:
         return lowered == "true"
+    
+    # Try numeric conversion
     try:
         return int(value_str)
     except ValueError:
-        pass
-    try:
-        return float(value_str)
-    except ValueError:
-        pass
+        try:
+            return float(value_str)
+        except ValueError:
+            pass
+    
     return value_str
 
 def _apply_nested_env_overrides(cfg: Dict[str, Any]) -> None:
@@ -176,47 +219,86 @@ class Settings(BaseModel):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
 
 def load_yaml_config(path: str) -> Dict[str, Any]:
-    with open(path, "r", encoding="utf-8") as f:
-        raw = f.read()
-    expanded = _expand_env_placeholders(raw)
-    data = yaml.safe_load(expanded) or {}
-    return data
+    """Load and parse YAML configuration file with environment variable expansion."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = f.read()
+        expanded = _expand_env_placeholders(raw)
+        data = yaml.safe_load(expanded) or {}
+        return data
+    except FileNotFoundError:
+        logger.error("Configuration file not found: %s", path)
+        raise
+    except yaml.YAMLError as exc:
+        logger.error("Failed to parse YAML configuration: %s", exc)
+        raise
+    except Exception as exc:
+        logger.error("Unexpected error loading configuration: %s", exc)
+        raise
+
+def _find_config_file(config_path: Optional[str] = None) -> str:
+    """Find the configuration file using multiple fallback strategies."""
+    if config_path and os.path.exists(config_path):
+        return config_path
+    
+    # Try environment variables
+    env_cfg = _get_env_var("CONFIG_FILE", "CONFIG_PATH")
+    if env_cfg and os.path.exists(env_cfg):
+        return env_cfg
+    
+    # Try relative to app directory
+    app_config = _build_config_path(_get_app_dir())
+    if os.path.exists(app_config):
+        return app_config
+    
+    # Try project root
+    project_root = _get_project_root()
+    project_config = _build_config_path(project_root)
+    if os.path.exists(project_config):
+        return project_config
+    
+    # Default fallback
+    return app_config
+
+def _parse_database_url(db_url: str) -> Dict[str, Any]:
+    """Parse DATABASE_URL into individual components."""
+    try:
+        import urllib.parse as _url
+        parsed = _url.urlparse(db_url)
+        return {
+            "host": parsed.hostname or "localhost",
+            "port": parsed.port or 5432,
+            "name": parsed.path.lstrip("/"),
+            "user": parsed.username or "",
+            "password": parsed.password or "",
+        }
+    except Exception as exc:
+        logger.warning("Failed to parse DATABASE_URL: %s", exc)
+        return {}
+
+def _setup_logging(settings: Settings) -> None:
+    """Configure logging based on settings."""
+    import logging as _logging
+    level_name = (settings.logging.level or "INFO").upper()
+    logger.setLevel(getattr(_logging, level_name, _logging.INFO))
 
 @lru_cache(maxsize=1)
 def get_settings(config_path: Optional[str] = None) -> Settings:
-    _try_load_dotenv()    
-    if not config_path:
-        env_cfg = os.getenv("CONFIG_FILE") or os.getenv("CONFIG_PATH")
-        if env_cfg and os.path.exists(env_cfg):
-            config_path = env_cfg
-    if not config_path:
-        config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.yaml")
-    if not os.path.exists(config_path):
-        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-        candidate = os.path.join(project_root, "config.yaml")
-        if os.path.exists(candidate):
-            config_path = candidate
-    cfg = load_yaml_config(config_path)
-    db_url = os.getenv("DATABASE_URL") or os.getenv("DB_URL")
+    """Load and validate application settings with caching."""
+    _try_load_dotenv()
+    
+    # Find configuration file
+    config_file = _find_config_file(config_path)
+    cfg = load_yaml_config(config_file)
+    
+    # Parse DATABASE_URL if present
+    db_url = _get_env_var("DATABASE_URL", "DB_URL")
     if db_url:
-        try:
-            import urllib.parse as _url
-            parsed = _url.urlparse(db_url)
-            user = parsed.username or ""
-            password = parsed.password or ""
-            host = parsed.hostname or "localhost"
-            port = parsed.port or 5432
-            name = parsed.path.lstrip("/")
-            cfg.setdefault("database", {})
-            cfg["database"].update({
-                "host": host,
-                "port": port,
-                "name": name,
-                "user": user,
-                "password": password,
-            })
-        except Exception as exc:
-            logger.warning("Failed to parse DATABASE_URL: %s", exc)    
+        db_config = _parse_database_url(db_url)
+        if db_config:
+            cfg.setdefault("database", {}).update(db_config)
+    
+    # Apply environment variable overrides
     _apply_nested_env_overrides(cfg)
     
     # Move requirement_gathering from root to llm section if it exists
@@ -224,22 +306,85 @@ def get_settings(config_path: Optional[str] = None) -> Settings:
         cfg["llm"]["requirement_gathering"] = cfg["requirement_gathering"]
         del cfg["requirement_gathering"]
     
+    # Create settings object
     settings = Settings(**cfg)
+    
+    # Apply additional environment variable overrides
     if not settings.embedding.api_key:
         settings.embedding.api_key = os.getenv("LLM_MODEL_API_KEY")
-    import logging as _logging
-    level_name = (settings.logging.level or "INFO").upper()
-    logger.setLevel(getattr(_logging, level_name, _logging.INFO))    
+    
+    # Setup logging
+    _setup_logging(settings)
+    
+    # Validate settings
     try:
         _log_missing_settings(settings)
-    except Exception as _exc:
-        logger.warning("Settings validation logging failed: %s", _exc)
+    except Exception as exc:
+        logger.warning("Settings validation logging failed: %s", exc)
+    
     return settings
+
+def _log_validation_message(level: str, message: str) -> None:
+    """Log a validation message at the specified level."""
+    getattr(logger, level)(message)
+
+def _log_config_error(section_name: str, exc: Exception) -> None:
+    """Log a configuration validation error."""
+    logger.warning("Failed checking %s config: %s", section_name, exc)
+
+def _validate_config_section(
+    section_name: str, 
+    section_obj: Any, 
+    validations: List[tuple[str, str, str, str]]
+) -> None:
+    """Generic config validation with unified error handling.
+    
+    Args:
+        section_name: Name of the config section for error messages
+        section_obj: The config object to validate
+        validations: List of (field, condition, level, message) tuples
+    """
+    try:
+        for field, condition, level, message in validations:
+            value = getattr(section_obj, field, None)
+            
+            if condition == "is_none_or_empty":
+                if value in (None, ""):
+                    _log_validation_message(level, message)
+            elif condition == "is_none_or_zero":
+                if value in (None, 0):
+                    _log_validation_message(level, message)
+            elif condition == "is_empty_list":
+                if not value:
+                    _log_validation_message(level, message)
+            elif condition == "is_none":
+                if value is None:
+                    _log_validation_message(level, message)
+            elif condition == "not_in_values":
+                valid_values = message.split("|")[1].split(",")
+                if value not in valid_values:
+                    _log_validation_message(level, message.split("|")[0])
+            elif condition == "custom":
+                # Custom validation logic
+                if field == "chunk_overlap_validation":
+                    ch = section_obj
+                    if (ch.chunk_size and ch.chunk_overlap and 
+                        ch.chunk_overlap >= ch.chunk_size):
+                        _log_validation_message(level, message.format(
+                            overlap=ch.chunk_overlap, size=ch.chunk_size))
+                elif field == "embedding_columns_validation":
+                    db = section_obj
+                    if (db.embedding_columns and 
+                        not set(db.embedding_columns).issubset(set(db.columns))):
+                        _log_validation_message(level, message)
+    except Exception as exc:
+        _log_config_error(section_name, exc)
 
 def _log_missing_settings(settings: Settings) -> None:
     """Log warnings for missing or suspicious configuration values.
     This does not raise; it only surfaces potential misconfigurations.
     """
+    # Database validation
     try:
         db = settings.database
         missing_db: List[str] = []
@@ -248,95 +393,71 @@ def _log_missing_settings(settings: Settings) -> None:
                 missing_db.append(key)
         if missing_db:
             logger.warning("Database config missing values: %s", ", ".join(sorted(missing_db)))
-        if not db.columns:
-            logger.warning("Database config 'columns' is empty; ingestion will have no fields to read")
-        if db.id_column in (None, ""):
-            logger.warning("Database config 'id_column' is not set; default string ids expected from data")
-
-        if db.embedding_columns and not set(db.embedding_columns).issubset(set(db.columns)):
-            logger.warning("Some 'embedding_columns' are not present in 'columns'; they will be ignored")
+        
+        db_validations = [
+            ("columns", "is_empty_list", "warning", "Database config 'columns' is empty; ingestion will have no fields to read"),
+            ("id_column", "is_none_or_empty", "warning", "Database config 'id_column' is not set; default string ids expected from data"),
+            ("embedding_columns_validation", "custom", "warning", "Some 'embedding_columns' are not present in 'columns'; they will be ignored"),
+        ]
+        _validate_config_section("database", db, db_validations)
     except Exception as exc:
-        logger.warning("Failed checking database config: %s", exc)
+        _log_config_error("database", exc)
 
-    try:
-        ch = settings.chunking
-        if ch.chunk_size in (None, 0):
-            logger.warning("Chunking 'chunk_size' is not set or zero; retrieval quality may be impacted")
-        if ch.chunk_overlap is None:
-            logger.warning("Chunking 'chunk_overlap' is not set; defaulting behavior may cause gaps")
-        if ch.chunk_size and ch.chunk_overlap and ch.chunk_overlap >= ch.chunk_size:
-            logger.warning("Chunking 'chunk_overlap' (=%s) >= 'chunk_size' (=%s); expect repeated chunks", ch.chunk_overlap, ch.chunk_size)
-        if ch.unit not in (None, "token", "char"):
-            logger.warning("Chunking 'unit' should be 'token' or 'char', got '%s'", ch.unit)
-    except Exception as exc:
-        logger.warning("Failed checking chunking config: %s", exc)
+    # Chunking validation
+    ch_validations = [
+        ("chunk_size", "is_none_or_zero", "warning", "Chunking 'chunk_size' is not set or zero; retrieval quality may be impacted"),
+        ("chunk_overlap", "is_none", "warning", "Chunking 'chunk_overlap' is not set; defaulting behavior may cause gaps"),
+        ("chunk_overlap_validation", "custom", "warning", "Chunking 'chunk_overlap' (={overlap}) >= 'chunk_size' (={size}); expect repeated chunks"),
+        ("unit", "not_in_values", "warning", "Chunking 'unit' should be 'token' or 'char', got '%s'|None,token,char"),
+    ]
+    _validate_config_section("chunking", settings.chunking, ch_validations)
 
-    try:
-        emb = settings.embedding
-        if not emb.provider:
-            logger.warning("Embedding 'provider' not set; default 'google' will be used")
-        if not emb.model:
-            logger.warning("Embedding 'model' not set; embedding may fail")
-        if emb.batch_size in (None, 0):
-            logger.warning("Embedding 'batch_size' is not set or zero; defaulting to 1")
-        if not emb.api_key:
-            logger.warning("Embedding 'api_key' not set; will try environment variable")
-    except Exception as exc:
-        logger.warning("Failed checking embedding config: %s", exc)
+    # Embedding validation
+    emb_validations = [
+        _create_provider_validation("Embedding"),
+        _create_model_validation("Embedding", "embedding"),
+        ("batch_size", "is_none_or_zero", "warning", "Embedding 'batch_size' is not set or zero; defaulting to 1"),
+        ("api_key", "is_none_or_empty", "warning", "Embedding 'api_key' not set; will try environment variable"),
+    ]
+    _validate_config_section("embedding", settings.embedding, emb_validations)
 
-    try:
-        vdb = settings.vector_db
-        if not vdb.provider:
-            logger.warning("Vector DB 'provider' not set; ensure Elasticsearch defaults are intended")
-        if not vdb.hosts:
-            logger.warning("Vector DB 'hosts' empty; client will not reach Elasticsearch")
-        if not vdb.index:
-            logger.warning("Vector DB 'index' not set; operations will fail until specified")
-        if not vdb.similarity:
-            logger.warning("Vector DB 'similarity' not set; default backend similarity will be used if any")
-        if vdb.dims in (None, 0):
-            logger.info("Vector DB 'dims' not set; will infer from embedding model on init")
-    except Exception as exc:
-        logger.warning("Failed checking vector DB config: %s", exc)
+    # Vector DB validation
+    vdb_validations = [
+        ("provider", "is_none_or_empty", "warning", "Vector DB 'provider' not set; ensure Elasticsearch defaults are intended"),
+        ("hosts", "is_empty_list", "warning", "Vector DB 'hosts' empty; client will not reach Elasticsearch"),
+        ("index", "is_none_or_empty", "warning", "Vector DB 'index' not set; operations will fail until specified"),
+        ("similarity", "is_none_or_empty", "warning", "Vector DB 'similarity' not set; default backend similarity will be used if any"),
+        ("dims", "is_none_or_zero", "info", "Vector DB 'dims' not set; will infer from embedding model on init"),
+    ]
+    _validate_config_section("vector_db", settings.vector_db, vdb_validations)
 
-    try:
-        ret = settings.retrieval
-        if ret.top_k in (None, 0):
-            logger.warning("Retrieval 'top_k' not set or zero; queries may return no results")
-        if ret.num_candidates_multiplier in (None, 0):
-            logger.warning("Retrieval 'num_candidates_multiplier' not set or zero; using top_k only")
-        if ret.filter_fields is None:
-            logger.warning("Retrieval 'filter_fields' is None; will be treated as empty list")
-    except Exception as exc:
-        logger.warning("Failed checking retrieval config: %s", exc)
+    # Retrieval validation
+    ret_validations = [
+        ("top_k", "is_none_or_zero", "warning", "Retrieval 'top_k' not set or zero; queries may return no results"),
+        ("num_candidates_multiplier", "is_none_or_zero", "warning", "Retrieval 'num_candidates_multiplier' not set or zero; using top_k only"),
+        ("filter_fields", "is_none", "warning", "Retrieval 'filter_fields' is None; will be treated as empty list"),
+    ]
+    _validate_config_section("retrieval", settings.retrieval, ret_validations)
 
-    try:
-        llm = settings.llm
-        if not llm.provider:
-            logger.warning("LLM 'provider' not set; default 'google' will be used")
-        if not llm.model:
-            logger.warning("LLM 'model' not set; generation may fail")
-        if llm.temperature is None:
-            logger.info("LLM 'temperature' not set; using provider default")
-        if llm.max_output_tokens is None:
-            logger.info("LLM 'max_output_tokens' not set; using provider default")
-    except Exception as exc:
-        logger.warning("Failed checking LLM config: %s", exc)
+    # LLM validation
+    llm_validations = [
+        _create_provider_validation("LLM"),
+        _create_model_validation("LLM", "generation"),
+        ("temperature", "is_none", "info", "LLM 'temperature' not set; using provider default"),
+        ("max_output_tokens", "is_none", "info", "LLM 'max_output_tokens' not set; using provider default"),
+    ]
+    _validate_config_section("llm", settings.llm, llm_validations)
 
-    try:
-        ing = settings.ingestion
-        if ing.batch_size in (None, 0):
-            logger.warning("Ingestion 'batch_size' not set or zero; default endpoint parameter must be provided")
-    except Exception as exc:
-        logger.warning("Failed checking ingestion config: %s", exc)
+    # Ingestion validation
+    ing_validations = [
+        ("batch_size", "is_none_or_zero", "warning", "Ingestion 'batch_size' not set or zero; default endpoint parameter must be provided"),
+    ]
+    _validate_config_section("ingestion", settings.ingestion, ing_validations)
 
-    try:
-        appcfg = settings.app
-        if not appcfg.name:
-            logger.info("App 'name' not set")
-        if not appcfg.host:
-            logger.info("App 'host' not set; FastAPI will use default host")
-        if not appcfg.port:
-            logger.info("App 'port' not set; FastAPI will use default port")
-    except Exception as exc:
-        logger.warning("Failed checking app config: %s", exc)
+    # App validation
+    app_validations = [
+        ("name", "is_none_or_empty", "info", "App 'name' not set"),
+        ("host", "is_none_or_empty", "info", "App 'host' not set; FastAPI will use default host"),
+        ("port", "is_none_or_zero", "info", "App 'port' not set; FastAPI will use default port"),
+    ]
+    _validate_config_section("app", settings.app, app_validations)

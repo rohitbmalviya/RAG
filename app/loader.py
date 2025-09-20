@@ -128,6 +128,21 @@ def _select_embedding_columns(settings: Settings, all_cols: List[str]) -> List[s
     field_types = db.field_types or {}
     return [c for c in all_cols if field_types.get(c) == "text"]
 
+def _process_media_item(item: Dict[str, object]) -> Optional[Dict[str, object]]:
+    """Process a single media item and return structured data."""
+    if not isinstance(item, dict):
+        return None
+    
+    media_entry: Dict[str, object] = {}
+    if item.get("id") is not None:
+        media_entry["id"] = item.get("id")
+    if item.get("file_name") is not None:
+        media_entry["file_name"] = item.get("file_name")
+    if item.get("thumbnail_url") is not None:
+        media_entry["thumbnail_url"] = item.get("thumbnail_url")
+    
+    return media_entry if media_entry else None
+
 def _extract_media_metadata(src: Dict[str, object]) -> Dict[str, object]:
     """
     Extract media objects from a 'media' array if present. Produces:
@@ -143,15 +158,7 @@ def _extract_media_metadata(src: Dict[str, object]) -> Dict[str, object]:
     if isinstance(media_items, list) and media_items:
         media_objs: List[Dict[str, object]] = []
         for item in media_items:
-            if not isinstance(item, dict):
-                continue
-            media_entry: Dict[str, object] = {}
-            if item.get("id") is not None:
-                media_entry["id"] = item.get("id")
-            if item.get("file_name") is not None:
-                media_entry["file_name"] = item.get("file_name")
-            if item.get("thumbnail_url") is not None:
-                media_entry["thumbnail_url"] = item.get("thumbnail_url")
+            media_entry = _process_media_item(item)
             if media_entry:
                 media_objs.append(media_entry)
         if media_objs:
@@ -195,13 +202,7 @@ def _build_media_map(conn: "psycopg.Connection", property_ids: List[str]) -> Dic
         for pid, items in tmp.items():
             media_objs: List[Dict[str, object]] = []
             for item in items:
-                media_entry: Dict[str, object] = {}
-                if item.get("id") is not None:
-                    media_entry["id"] = item.get("id")
-                if item.get("file_name") is not None:
-                    media_entry["file_name"] = item.get("file_name")
-                if item.get("thumbnail_url") is not None:
-                    media_entry["thumbnail_url"] = item.get("thumbnail_url")
+                media_entry = _process_media_item(item)
                 if media_entry:
                     media_objs.append(media_entry)
             entry: Dict[str, object] = {}
@@ -214,53 +215,134 @@ def _build_media_map(conn: "psycopg.Connection", property_ids: List[str]) -> Dic
         return {}
     return media_map
 
+def _create_document_from_row(
+    row: Dict[str, object], 
+    settings: Settings, 
+    cols: List[str], 
+    embed_cols: List[str]
+) -> Document:
+    """Create a Document from a row with common metadata processing."""
+    row_id = str(row.get(settings.database.id_column) or row.get("id") or "")
+    metadata: Dict[str, object] = {"table": settings.database.table or "file", "id": row_id}
+    for c in cols:
+        metadata[c] = row.get(c)
+    
+    # Extract media metadata if present
+    if "media" in row and row["media"]:
+        try:
+            media_md = _extract_media_metadata({"media": row["media"]})
+            metadata.update(media_md)
+        except Exception:
+            pass
+    
+    text = _compose_text(row, embed_cols)
+    return Document(id=row_id, text=text, metadata=metadata)
+
 def _load_documents_from_csv(path: str, settings: Settings) -> Iterable[Document]:
     import csv
     logger = get_logger(__name__)
-    cols = [c for c in settings.database.columns if c != settings.database.id_column]
-    embed_cols = _select_embedding_columns(settings, cols)
+    cols, embed_cols = _prepare_columns(settings)
     with open(path, newline="", encoding=UTF8_ENCODING) as f:
         reader = csv.DictReader(f)
         for row in reader:
-            row_id = str(row.get(settings.database.id_column) or row.get("id") or "")
-            metadata: Dict[str, object] = {"table": settings.database.table or "file", "id": row_id}
-            for c in cols:
-                metadata[c] = row.get(c)
-            # Derive media metadata if a 'media' JSON column exists in CSV
-            if "media" in row and row["media"]:
-                try:
-                    media_md = _extract_media_metadata({"media": row["media"]})
-                    metadata.update(media_md)
-                except Exception:
-                    pass
-            text = _compose_text(row, embed_cols)
-            yield Document(id=row_id, text=text, metadata=metadata)
+            yield _create_document_from_row(row, settings, cols, embed_cols)
 
 def _load_documents_from_jsonl(path: str, settings: Settings) -> Iterable[Document]:
     logger = get_logger(__name__)
-    cols = [c for c in settings.database.columns if c != settings.database.id_column]
-    embed_cols = _select_embedding_columns(settings, cols)
+    cols, embed_cols = _prepare_columns(settings)
     with open(path, "r", encoding=UTF8_ENCODING) as f:
         for line in f:
             if not line.strip():
                 continue
             data = json.loads(line)
-            row_id = str(data.get(settings.database.id_column) or data.get("id") or "")
-            metadata: Dict[str, object] = {"table": settings.database.table or "file", "id": row_id}
-            for c in cols:
-                metadata[c] = data.get(c)
             # Extract media-based image fields for downstream UI usage
             media_md = _extract_media_metadata(data)
             if media_md:
-                metadata.update(media_md)
-            text = _compose_text(data, embed_cols)
-            yield Document(id=row_id, text=text, metadata=metadata)
+                data.update(media_md)
+            yield _create_document_from_row(data, settings, cols, embed_cols)
 
 def _load_documents_from_txt(path: str, settings: Settings) -> Iterable[Document]:
     with open(path, "r", encoding=UTF8_ENCODING) as f:
         text = f.read()
     meta: Dict[str, object] = {"table": settings.database.table or "file", "id": "0"}
     yield Document(id="0", text=text, metadata=meta)
+
+def _validate_database_config(db, logger) -> bool:
+    """Validate database configuration and log errors."""
+    if not db.table:
+        logger.error("Database table name is missing in configuration")
+        return False
+    if not db.columns:
+        logger.error("Database columns are missing in configuration")
+        return False
+    if not all([db.user, db.password, db.host, db.port, db.name]):
+        logger.error("Database connection details are incomplete for SQL ingestion")
+        return False
+    return True
+
+def _build_sql_connection_string(db) -> str:
+    """Build PostgreSQL connection string."""
+    return f"postgresql://{db.user}:{db.password}@{db.host}:{db.port}/{db.name}"
+
+def _prepare_columns(settings: Settings) -> tuple[List[str], List[str]]:
+    """Prepare column lists for document processing."""
+    cols = [c for c in settings.database.columns if c != settings.database.id_column]
+    embed_cols = _select_embedding_columns(settings, cols)
+    return cols, embed_cols
+
+def _prepare_sql_columns(db) -> tuple[str, List[str], List[str]]:
+    """Prepare SQL column names and quoted versions."""
+    id_col = db.id_column
+    cols = [c for c in db.columns if c != id_col]
+    image_meta_cols = {"media"}
+    sql_cols = [c for c in cols if c not in image_meta_cols]
+    quoted_id_col = f'"{id_col}"'
+    quoted_cols = [f'"{c}"' for c in sql_cols]
+    return quoted_id_col, quoted_cols, cols
+
+def _build_sql_query(table: str, quoted_id_col: str, quoted_cols: List[str], where_clause: str = "") -> str:
+    """Build SQL query with JOINs for property and rent type names."""
+    qualified_columns = []
+    for col in [quoted_id_col] + quoted_cols:
+        qualified_columns.append(f'p.{col}')
+    qualified_select_cols = ", ".join(qualified_columns)
+    
+    base_query = f"""
+        SELECT {qualified_select_cols},
+               pt.name as property_type_name,
+               prt.name as rent_type_name
+        FROM "{table}" p
+        LEFT JOIN property_types pt ON p.property_type_id = pt.id
+        LEFT JOIN property_rent_types prt ON p.rent_type_id = prt.id
+        WHERE p.property_status = 'listed'"""
+    
+    if where_clause:
+        base_query += f" AND {where_clause}"
+    
+    return base_query
+
+def _create_document_from_sql_row(
+    row: Dict[str, object], 
+    table: str, 
+    cols: List[str], 
+    embed_cols: List[str], 
+    id_column: str,
+    media_map: Optional[Dict[str, Dict[str, object]]] = None
+) -> Document:
+    """Create a Document from a SQL row with common metadata processing."""
+    row_id = str(row[id_column])
+    metadata = {"table": table, "id": row_id}
+    
+    for c in cols:
+        if c in row:
+            metadata[c] = row.get(c)
+    
+    # Enrich from media_map if available
+    if media_map and row_id in media_map:
+        metadata.update(media_map[row_id])
+    
+    text = _compose_text(row, embed_cols)
+    return Document(id=row_id, text=text, metadata=metadata)
 
 def load_documents(settings: Settings, batch_size: int) -> Generator[List[Document], None, None]:
     """
@@ -270,46 +352,22 @@ def load_documents(settings: Settings, batch_size: int) -> Generator[List[Docume
     """
     logger = get_logger(__name__)
     db = settings.database
-    if not db.table:
-        logger.error("Database table name is missing in configuration")
-    if not db.columns:
-        logger.error("Database columns are missing in configuration")
+    if not _validate_database_config(db, logger):
+        return
+    
     table = db.table
-    id_col = db.id_column
-    cols = [c for c in db.columns if c != id_col]
-    embed_cols = _select_embedding_columns(settings, cols)
-    # Some fields like images are derived from related tables or JSON inputs and
-    # do not exist as columns in SQL. Exclude them from SELECT to avoid errors.
-    image_meta_cols = {"media"}
-    sql_cols = [c for c in cols if c not in image_meta_cols]
-    quoted_id_col = f'"{id_col}"'
-    quoted_cols = [f'"{c}"' for c in sql_cols]
+    quoted_id_col, quoted_cols, cols = _prepare_sql_columns(db)
+    _, embed_cols = _prepare_columns(settings)
     source_type = (settings.ingestion.source_type or "sql").lower()
     source_path = settings.ingestion.source_path
+    
     if source_type == "sql":
-        if not all([db.user, db.password, db.host, db.port, db.name]):
-            logger.error("Database connection details are incomplete for SQL ingestion")
-        dsn = f"postgresql://{db.user}:{db.password}@{db.host}:{db.port}/{db.name}"
+        dsn = _build_sql_connection_string(db)
+        sql = _build_sql_query(table, quoted_id_col, quoted_cols)
         
-        # Build JOIN query to get property type and rent type names
-        # Qualify all column names with table alias to avoid ambiguity
-        qualified_columns = []
-        for col in [quoted_id_col] + quoted_cols:
-            qualified_columns.append(f'p.{col}')
-        qualified_select_cols = ", ".join(qualified_columns)
-        
-        sql = f"""
-        SELECT {qualified_select_cols},
-               pt.name as property_type_name,
-               prt.name as rent_type_name
-        FROM "{table}" p
-        LEFT JOIN property_types pt ON p.property_type_id = pt.id
-        LEFT JOIN property_rent_types prt ON p.rent_type_id = prt.id
-        WHERE p.property_status = 'listed'
-        """
         logger.info(f"Loading documents from table '{table}' with columns {cols} and joined property/rent type names")
-        if id_col not in db.columns:
-            logger.warning("Configured id_column '%s' not present in database.columns; ensure it's selected", id_col)
+        if db.id_column not in db.columns:
+            logger.warning("Configured id_column '%s' not present in database.columns; ensure it's selected", db.id_column)
         with psycopg.connect(dsn, row_factory=dict_row) as conn:
             with conn.cursor(name="server_cursor") as cur:
                 cur.itersize = batch_size
@@ -319,27 +377,18 @@ def load_documents(settings: Settings, batch_size: int) -> Generator[List[Docume
                     if not rows:
                         break
                     # Build media map for this batch (if media table exists)
-                    prop_ids: List[str] = [str(r[id_col]) for r in rows if r.get(id_col) is not None]
+                    prop_ids: List[str] = [str(r[db.id_column]) for r in rows if r.get(db.id_column) is not None]
                     media_map = _build_media_map(conn, prop_ids)
                     documents: List[Document] = []
                     for row in rows:
-                        row_id = str(row[id_col])
-                        metadata = {"table": table, "id": row_id}
+                        # Skip warning for derived image metadata fields
                         for c in cols:
-                            if c in row:
-                                metadata[c] = row.get(c)
-                            else:
-                                # Skip warning for derived image metadata fields
-                                if c not in image_meta_cols:
-                                    logger.warning("Row %s missing expected column '%s'", row_id, c)
-
-                        # Enrich from media_map if available
-                        media_md = media_map.get(row_id)
-                        if media_md:
-                            metadata.update(media_md)
-
-                        text = _compose_text(row, embed_cols)
-                        documents.append(Document(id=row_id, text=text, metadata=metadata))
+                            if c not in row and c not in {"media"}:
+                                row_id = str(row[db.id_column])
+                                logger.warning("Row %s missing expected column '%s'", row_id, c)
+                        
+                        doc = _create_document_from_sql_row(row, table, cols, embed_cols, db.id_column, media_map)
+                        documents.append(doc)
                     yield documents
         return
 
@@ -366,28 +415,15 @@ def load_document_by_id(settings: Settings, record_id: str) -> Optional[Document
     if source_type != "sql":
         logger.error("Single-record load is only supported for SQL source_type; got '%s'", source_type)
         return None
-    if not all([db.user, db.password, db.host, db.port, db.name]):
-        logger.error("Database connection details are incomplete for SQL ingestion")
+    if not _validate_database_config(db, logger):
         return None
+    
     table = db.table
-    id_col = db.id_column
-    cols = [c for c in db.columns if c != id_col]
-    embed_cols = _select_embedding_columns(settings, cols)
-    quoted_id_col = f'"{id_col}"'
-    quoted_cols = [f'"{c}"' for c in cols if c != "media"]
-    # Qualify all column names with table alias to avoid ambiguity
-    qualified_columns: List[str] = [f'p.{quoted_id_col}'] + [f'p.{c}' for c in quoted_cols]
-    qualified_select_cols = ", ".join(qualified_columns)
-    sql = f"""
-        SELECT {qualified_select_cols},
-               pt.name as property_type_name,
-               prt.name as rent_type_name
-        FROM "{table}" p
-        LEFT JOIN property_types pt ON p.property_type_id = pt.id
-        LEFT JOIN property_rent_types prt ON p.rent_type_id = prt.id
-        WHERE p.{quoted_id_col} = %s AND p.property_status = 'listed'
-    """
-    dsn = f"postgresql://{db.user}:{db.password}@{db.host}:{db.port}/{db.name}"
+    quoted_id_col, quoted_cols, cols = _prepare_sql_columns(db)
+    _, embed_cols = _prepare_columns(settings)
+    
+    sql = _build_sql_query(table, quoted_id_col, quoted_cols, f"p.{quoted_id_col} = %s")
+    dsn = _build_sql_connection_string(db)
     try:
         with psycopg.connect(dsn, row_factory=dict_row) as conn:
             with conn.cursor() as cur:
@@ -395,17 +431,9 @@ def load_document_by_id(settings: Settings, record_id: str) -> Optional[Document
                 row: Optional[Dict[str, object]] = cur.fetchone()
                 if not row:
                     return None
-                row_id = str(row[id_col])
-                metadata: Dict[str, object] = {"table": table, "id": row_id}
-                for c in cols:
-                    if c in row:
-                        metadata[c] = row.get(c)
                 # Enrich media metadata if media table exists
-                media_map = _build_media_map(conn, [row_id])
-                if row_id in media_map:
-                    metadata.update(media_map[row_id])
-                text = _compose_text(row, embed_cols)
-                return Document(id=row_id, text=text, metadata=metadata)
+                media_map = _build_media_map(conn, [record_id])
+                return _create_document_from_sql_row(row, table, cols, embed_cols, db.id_column, media_map)
     except Exception:
         logger.exception("Failed to load record %s from table %s", record_id, table)
         return None

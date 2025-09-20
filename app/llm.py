@@ -1,11 +1,18 @@
 from __future__ import annotations
 from typing import Any, Callable, Dict, List, Optional, Type
+import os
 import time
 import requests
 from .config import LLMConfig
 from .core.base import BaseLLM
 from .models import RetrievedChunk
 from .utils import get_logger
+
+# Import pipeline_state for alternative suggestions
+try:
+    from .main import pipeline_state
+except ImportError:
+    pipeline_state = None
 
 def filter_retrieved_chunks(chunks: List[RetrievedChunk], min_score: float = 0.7) -> List[RetrievedChunk]:
     """Filter chunks based on relevance score (if available)."""
@@ -45,6 +52,9 @@ class Conversation:
 
 LLM_PROVIDERS: Dict[str, Type["BaseLLMProvider"]] = {}
 
+# System prompt constants to avoid duplication
+SYSTEM_PROMPT_BASE = "You are LeaseOasis, a conversational UAE property leasing assistant"
+
 def register_llm_provider(name: str) -> Callable[[Type["BaseLLMProvider"]], Type["BaseLLMProvider"]]:
     def decorator(cls: Type["BaseLLMProvider"]) -> Type["BaseLLMProvider"]:
         LLM_PROVIDERS[name.lower()] = cls
@@ -61,7 +71,6 @@ class BaseLLMProvider:
 
     def _ensure_api_key(self) -> None:
         if not self._api_key:
-            import os
             self._api_key = os.getenv("LLM_MODEL_API_KEY")
 
     def _setup_client(self) -> None:
@@ -237,7 +246,7 @@ class LLMClient(BaseLLM):
         # Updated system instructions
         self.conversation.add_message(
             "system",
-            "You are LeaseOasis, a conversational UAE property leasing assistant.\n"
+            f"{SYSTEM_PROMPT_BASE}.\n"
             "\n"
             "Core Behavior:\n"
             "- Always sound polite, respectful, and human-like.\n"
@@ -380,7 +389,6 @@ class LLMClient(BaseLLM):
         
         # Handle alternative selection
         elif user_input in ["1", "option 1", "first", "alternatives"] and "Try alternate searches" in last_assistant_message:
-            from .main import pipeline_state
             preferences = self.conversation.get_preferences()
             verified_alternatives = self._get_verified_alternatives(preferences, pipeline_state.retriever_client)
             
@@ -396,11 +404,11 @@ class LLMClient(BaseLLM):
                     if alt_chunks:
                         context_prompt = self._build_context_prompt(f"Show me {alt['suggestion']}", alt_chunks)
                         response = self._safe_generate([{"role": "user", "content": context_prompt}])
-                        self.conversation.add_message("user", user_input)
-                        self.conversation.add_message("assistant", response)
+                        self._add_conversation_messages(user_input, response)
                         return response
-                except Exception:
-                    pass
+                except Exception as e:
+                    self._logger.warning(f"Failed to retrieve alternative properties: {e}")
+                    continue
             
             return (
                 "Let me search for alternative properties based on your preferences. "
@@ -426,8 +434,7 @@ class LLMClient(BaseLLM):
         ]
         import random
         response = random.choice(greetings)
-        self.conversation.add_message("user", user_input)
-        self.conversation.add_message("assistant", response)
+        self._add_conversation_messages(user_input, response)
         return response
 
     def _handle_outside_uae_query(self, user_input: str) -> str:
@@ -436,27 +443,24 @@ class LLMClient(BaseLLM):
             "I'm sorry, but I can only assist with properties in the UAE. I specialize in helping you find great leasing options in Dubai, Abu Dhabi, Sharjah, and other UAE cities. "
             "Would you like to explore properties in any of these UAE locations instead?"
         )
-        self.conversation.add_message("user", user_input)
-        self.conversation.add_message("assistant", response)
+        self._add_conversation_messages(user_input, response)
         return response
 
     def _handle_general_knowledge_query(self, user_input: str) -> str:
         """Handle general property knowledge queries"""
         # Use web search for general knowledge
         try:
-            from .utils import get_logger
-            logger = get_logger(__name__)
             # For now, provide a helpful response without web search
             response = (
                 "I'd be happy to explain that! However, I'm specifically designed to help you find properties to lease in the UAE. "
                 "If you have questions about property types, leasing terms, or UAE-specific property information, I can help with that. "
                 "Would you like to search for properties instead, or do you have a specific UAE property question?"
             )
-        except Exception:
+        except Exception as e:
+            self._logger.warning(f"Error handling general knowledge query: {e}")
             response = "I can help you with UAE property-related questions. Would you like to search for properties instead?"
         
-        self.conversation.add_message("user", user_input)
-        self.conversation.add_message("assistant", response)
+        self._add_conversation_messages(user_input, response)
         return response
 
     def _handle_best_property_query(self, user_input: str, retrieved_chunks: Optional[List[RetrievedChunk]] = None) -> str:
@@ -470,8 +474,7 @@ class LLMClient(BaseLLM):
             preferences = self.conversation.get_preferences()
             response = self._handle_no_results(user_input, preferences)
 
-        self.conversation.add_message("user", user_input)
-        self.conversation.add_message("assistant", response)
+        self._add_conversation_messages(user_input, response)
         return response
 
     def _handle_average_price_query(self, user_input: str, retrieved_chunks: Optional[List[RetrievedChunk]] = None) -> str:
@@ -486,8 +489,7 @@ class LLMClient(BaseLLM):
                 "Could you please specify the location and property type you're interested in?"
             )
 
-        self.conversation.add_message("user", user_input)
-        self.conversation.add_message("assistant", response)
+        self._add_conversation_messages(user_input, response)
         return response
 
     def _handle_property_query(self, user_input: str, retrieved_chunks: Optional[List[RetrievedChunk]] = None) -> str:
@@ -504,8 +506,7 @@ class LLMClient(BaseLLM):
             # No results found - offer alternatives or gather requirements
             response = self._handle_no_results(user_input, preferences)
 
-        self.conversation.add_message("user", user_input)
-        self.conversation.add_message("assistant", response)
+        self._add_conversation_messages(user_input, response)
         return response
 
     def _handle_general_query(self, user_input: str) -> str:
@@ -514,8 +515,7 @@ class LLMClient(BaseLLM):
             "I'm here to help you find properties to lease in the UAE. I can assist with searching for apartments, villas, and other properties in Dubai, Abu Dhabi, and other UAE cities. "
             "What type of property are you looking for, or would you like me to help you with something specific?"
         )
-        self.conversation.add_message("user", user_input)
-        self.conversation.add_message("assistant", response)
+        self._add_conversation_messages(user_input, response)
         return response
 
     def _build_context_from_chunks(self, retrieved_chunks: List[RetrievedChunk]) -> str:
@@ -530,7 +530,7 @@ class LLMClient(BaseLLM):
 
     def _build_prompt_template(self, instructions: str, user_input: str, context_block: str) -> str:
         """Build a standardized prompt template to eliminate duplication"""
-        return self._build_prompt_template(instructions, user_input, context_block)
+        return f"Instructions:\n{instructions}\n\nUser question:\n{user_input}\n\nProperty Context:\n{context_block}\n\nResponse:"
 
     def _build_context_prompt(self, user_input: str, retrieved_chunks: List[RetrievedChunk]) -> str:
         """Build a context-aware prompt for property queries with conversation memory (Step 8)"""
@@ -538,11 +538,9 @@ class LLMClient(BaseLLM):
         conversation_history = self._get_conversation_context()
         user_preferences = self.conversation.get_preferences()
         
-        context_block = self._build_context_from_chunks(retrieved_chunks)
-        
         # Enhanced instructions for Step 8 - Interactive conversation with memory
         instructions = (
-            "You are LeaseOasis, a conversational UAE property leasing assistant with memory.\n"
+            f"{SYSTEM_PROMPT_BASE} with memory.\n"
             "\n"
             "CORE BEHAVIOR (Step 8 Requirements):\n"
             "- Sound like a human property expert, not a chatbot\n"
@@ -589,7 +587,8 @@ class LLMClient(BaseLLM):
             if pref_items:
                 preferences_section = f"\n\nUSER PREFERENCES: {', '.join(pref_items)}"
 
-        return f"Instructions:\n{instructions}{memory_section}{preferences_section}\n\nUser question:\n{user_input}\n\nProperty Context:\n{context_block}\n\nResponse:"
+        full_instructions = f"{instructions}{memory_section}{preferences_section}"
+        return self._build_context_and_prompt(user_input, retrieved_chunks, full_instructions)
 
     def _get_conversation_context(self) -> str:
         """Get recent conversation history for short-term memory"""
@@ -610,10 +609,8 @@ class LLMClient(BaseLLM):
 
     def _build_best_property_prompt(self, user_input: str, retrieved_chunks: List[RetrievedChunk]) -> str:
         """Build a context-aware prompt for best property queries"""
-        context_block = self._build_context_from_chunks(retrieved_chunks)
-        
         instructions = (
-            "You are LeaseOasis, a conversational UAE property leasing assistant.\n"
+            f"{SYSTEM_PROMPT_BASE}.\n"
             "Best Property Query Instructions:\n"
             "- Prioritize properties in this exact order:\n"
             "  1. Properties with premiumBoostingStatus: 'Active', carouselBoostingStatus: 'Active', and bnb_verification_status: 'verified'\n"
@@ -626,14 +623,12 @@ class LLMClient(BaseLLM):
             "- If no premium/verified properties exist, show the best available options.\n"
         )
 
-        return self._build_prompt_template(instructions, user_input, context_block)
+        return self._build_context_and_prompt(user_input, retrieved_chunks, instructions)
 
     def _build_average_price_prompt(self, user_input: str, retrieved_chunks: List[RetrievedChunk]) -> str:
         """Build a context-aware prompt for average price queries"""
-        context_block = self._build_context_from_chunks(retrieved_chunks)
-        
         instructions = (
-            "You are LeaseOasis, a conversational UAE property leasing assistant.\n"
+            f"{SYSTEM_PROMPT_BASE}.\n"
             "Average Price Query Instructions:\n"
             "- Calculate the average rent_charge from the retrieved context.\n"
             "- Provide the average value in AED.\n"
@@ -643,15 +638,14 @@ class LLMClient(BaseLLM):
             "- Example format: 'The average rent for 2-bedroom apartments in Dubai Marina is AED 95,000/year based on the available data.'\n"
         )
 
-        return self._build_prompt_template(instructions, user_input, context_block)
+        return self._build_context_and_prompt(user_input, retrieved_chunks, instructions)
 
     def _handle_no_results(self, user_input: str, preferences: Dict[str, Any]) -> str:
         """Handle cases where no properties are found - with context checking and requirement gathering"""
-        from .retriever import Retriever
-        from .main import pipeline_state
         
         # Check verified alternatives by querying vector database
-        verified_alternatives = self._get_verified_alternatives(preferences, pipeline_state.retriever_client)
+        retriever_client = pipeline_state.retriever_client if pipeline_state else None
+        verified_alternatives = self._get_verified_alternatives(preferences, retriever_client)
         
         conversation_summary = self._summarize_conversation_context()
         
@@ -677,66 +671,6 @@ class LLMClient(BaseLLM):
         
         return response
 
-    def _generate_alternative_suggestions(self, preferences: Dict[str, Any]) -> List[Dict[str, str]]:
-        """Generate alternative search suggestions based on user preferences"""
-        alternatives = []
-        
-        # Location alternatives
-        if "emirate" in preferences:
-            current_emirate = preferences["emirate"]
-            if current_emirate == "sharjah":
-                alternatives.append({
-                    "suggestion": "Try Dubai (nearby, more options available)",
-                    "type": "location"
-                })
-            elif current_emirate == "dubai":
-                alternatives.append({
-                    "suggestion": "Try Abu Dhabi (similar lifestyle options)",
-                    "type": "location"
-                })
-        
-        # Budget alternatives
-        if "rent_charge" in preferences:
-            current_budget = preferences["rent_charge"]
-            if isinstance(current_budget, dict) and "lte" in current_budget:
-                budget = current_budget["lte"]
-                alternatives.append({
-                    "suggestion": f"Try budget up to AED {int(budget * 1.2):,} (20% higher)",
-                    "type": "budget"
-                })
-                alternatives.append({
-                    "suggestion": f"Try budget up to AED {int(budget * 0.8):,} (20% lower)",
-                    "type": "budget"
-                })
-        
-        # Bedroom alternatives
-        if "number_of_bedrooms" in preferences:
-            bedrooms = preferences["number_of_bedrooms"]
-            if bedrooms > 1:
-                alternatives.append({
-                    "suggestion": f"Try {bedrooms - 1} bedroom properties",
-                    "type": "bedrooms"
-                })
-            alternatives.append({
-                "suggestion": f"Try {bedrooms + 1} bedroom properties",
-                "type": "bedrooms"
-            })
-        
-        # Furnishing alternatives
-        if "furnishing_status" in preferences:
-            current_furnishing = preferences["furnishing_status"]
-            if current_furnishing == "furnished":
-                alternatives.append({
-                    "suggestion": "Try semi-furnished properties (more options available)",
-                    "type": "furnishing"
-                })
-            elif current_furnishing == "unfurnished":
-                alternatives.append({
-                    "suggestion": "Try furnished properties",
-                    "type": "furnishing"
-                })
-        
-        return alternatives
 
     def _get_verified_alternatives(self, preferences: Dict[str, Any], retriever) -> List[Dict[str, Any]]:
         """Check vector database for viable alternatives and return verified suggestions"""
@@ -775,7 +709,8 @@ class LLMClient(BaseLLM):
                                 "filters": test_filters,
                                 "count": f"{len(count_chunks)}+"
                             })
-                    except Exception:
+                    except Exception as e:
+                        self._logger.debug(f"Failed to check alternative: {e}")
                         continue
             
             # Budget alternatives - check flexible pricing
@@ -823,7 +758,8 @@ class LLMClient(BaseLLM):
                                 "count": f"{len(test_chunks)}+"
                             })
                             break  # Only suggest one alternative type
-                    except Exception:
+                    except Exception as e:
+                        self._logger.debug(f"Failed to check alternative: {e}")
                         continue
                         
         except Exception as e:
@@ -899,7 +835,6 @@ class LLMClient(BaseLLM):
     
     def _send_requirements_to_endpoint(self, requirements: Dict[str, Any]) -> str:
         """Send requirements to the backend endpoint"""
-        import time
         
         endpoint = self._config.requirement_gathering.endpoint or "http://localhost:5000/backend/api/v1/user/requirement"
         
@@ -939,6 +874,16 @@ class LLMClient(BaseLLM):
     def generate(self, prompt: str) -> str:
         """Fallback for BaseLLM compatibility."""
         return self._safe_generate([{"role": "user", "content": prompt}])
+
+    def _add_conversation_messages(self, user_input: str, response: str) -> None:
+        """Helper method to add user and assistant messages to conversation history"""
+        self.conversation.add_message("user", user_input)
+        self.conversation.add_message("assistant", response)
+
+    def _build_context_and_prompt(self, user_input: str, retrieved_chunks: List[RetrievedChunk], instructions: str) -> str:
+        """Helper method to build context and prompt template to eliminate duplication"""
+        context_block = self._build_context_from_chunks(retrieved_chunks)
+        return self._build_prompt_template(instructions, user_input, context_block)
 
     def _safe_generate(self, messages: List[Dict[str, str]], retries: int = 2, delay: int = 1) -> str:
         """Call provider safely with retry logic."""

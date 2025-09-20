@@ -13,6 +13,14 @@ TEXT_TYPE = "text"
 INTEGER_TYPE = "integer"
 FLOAT_TYPE = "float"
 
+# High-frequency filter fields that are stored at root level for performance
+HIGH_FREQUENCY_FILTERS = {
+    "emirate", "city", "property_type_id", "rent_type_id", 
+    "furnishing_status", "number_of_bedrooms", "number_of_bathrooms",
+    "property_status", "bnb_verification_status", "premiumBoostingStatus", 
+    "carouselBoostingStatus", "rent_charge", "property_size"
+}
+
 class VectorStoreClient(BaseVectorStore):
     def __init__(self, config: VectorDBConfig) -> None:
         self._logger = get_logger(__name__)
@@ -37,11 +45,31 @@ class VectorStoreClient(BaseVectorStore):
     def _get_settings_data(self) -> tuple[List[str], List[str], Dict[str, str]]:
         """Get commonly used settings data to eliminate duplication"""
         settings = get_settings()
-        columns, filter_fields, field_types = self._get_settings_data()
+        columns = list(settings.database.columns)
+        filter_fields = list(settings.retrieval.filter_fields)
+        field_types = settings.vector_db.field_types or {}
         return columns, filter_fields, field_types
 
+    def _get_index_name(self) -> str:
+        """Get index name to eliminate duplication"""
+        return self._config.index
+
+    def _process_metadata_fields(self, doc: Document, source: Dict[str, Any], fields: List[str]) -> None:
+        """Process metadata fields and add to source if not None"""
+        for field in fields:
+            if field in source:
+                continue
+            value = doc.metadata.get(field)
+            if value is not None:
+                source[field] = value
+
+    def _log_bulk_errors(self, errors: List[Any], max_errors: int = 5) -> None:
+        """Log bulk operation errors with limit"""
+        for err in errors[:max_errors]:
+            self._logger.error("Bulk error item: %s", err)
+
     def ensure_index(self, dims: int) -> None:
-        index = self._config.index
+        index = self._get_index_name()
         settings = get_settings()
 
         if self._index_exists(index):
@@ -108,7 +136,7 @@ class VectorStoreClient(BaseVectorStore):
             raise
 
     def delete_index(self) -> None:
-        index = self._config.index
+        index = self._get_index_name()
         try:
             if self._index_exists(index):
                 self._client.indices.delete(index=index)
@@ -118,10 +146,8 @@ class VectorStoreClient(BaseVectorStore):
     def upsert(
         self, documents: List[Document], embeddings: List[List[float]], refresh: Optional[bool] = None
     ) -> Tuple[int, int]:
-        index = self._config.index
-        settings = get_settings()
-        columns: List[str] = list(settings.database.columns)
-        filter_fields: List[str] = list(settings.retrieval.filter_fields)
+        index = self._get_index_name()
+        columns, filter_fields, field_types = self._get_settings_data()
         expected_dims = int(self._config.dims) if self._config.dims else None
         skipped_for_dim_mismatch = 0
         actions: List[Dict[str, Any]] = []
@@ -143,25 +169,10 @@ class VectorStoreClient(BaseVectorStore):
             }
             # Add essential fields for indexing
             essential_fields = ["table", "source_id", "chunk_index", "chunk_offset", "chunk_unit"]
-            for field in essential_fields:
-                value = doc.metadata.get(field)
-                if value is not None:
-                    source[field] = value
-            
+            self._process_metadata_fields(doc, source, essential_fields)
             # Add only the most frequently used filter fields at root level for RAG performance
             # These are the fields you'll filter on most often in your RAG queries
-            high_frequency_filters = [
-                "emirate", "city", "property_type_id", "rent_type_id", 
-                "furnishing_status", "number_of_bedrooms", "number_of_bathrooms",
-                "property_status", "bnb_verification_status", "premiumBoostingStatus", 
-                "carouselBoostingStatus", "rent_charge", "property_size"
-            ]
-            for field in high_frequency_filters:
-                if field in source:
-                    continue
-                value = doc.metadata.get(field)
-                if value is not None:
-                    source[field] = value
+            self._process_metadata_fields(doc, source, list(HIGH_FREQUENCY_FILTERS))
             actions.append({"_op_type": "index", "_index": index, "_id": doc.id, "_source": source})
         try:
             success, errors = bulk(
@@ -172,15 +183,13 @@ class VectorStoreClient(BaseVectorStore):
         except BulkIndexError as exc:
             error_items = exc.errors if hasattr(exc, "errors") else []
             self._logger.error("Bulk upsert failed: %s", exc)
-            for err in error_items[:5]:
-                self._logger.error("Bulk error item: %s", err)
+            self._log_bulk_errors(error_items, 5)
             return 0, len(error_items)
         except Exception as exc:
             self._logger.error("Bulk upsert failed (unexpected): %s", exc)
             raise
         if isinstance(errors, list) and errors:
-            for err in errors[:3]:
-                self._logger.error("Bulk error item: %s", err)
+            self._log_bulk_errors(errors, 3)
 
         total_errors = (len(errors) if isinstance(errors, list) else 0) + skipped_for_dim_mismatch
         return success, total_errors
@@ -192,7 +201,7 @@ class VectorStoreClient(BaseVectorStore):
         num_candidates: int,
         filters: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
-        index = self._config.index
+        index = self._get_index_name()
         settings = get_settings()
         knn = {
             "field": "embedding",
@@ -204,13 +213,6 @@ class VectorStoreClient(BaseVectorStore):
         filter_clauses: List[Dict[str, Any]] = []
         if filters:
             allowed = set(settings.retrieval.filter_fields or [])
-            # High-frequency filter fields that are stored at root level for performance
-            high_frequency_filters = {
-                "emirate", "city", "property_type_id", "rent_type_id", 
-                "furnishing_status", "number_of_bedrooms", "number_of_bathrooms",
-                "property_status", "bnb_verification_status", "premiumBoostingStatus", 
-                "carouselBoostingStatus", "rent_charge", "property_size"
-            }
             
             for key, value in filters.items():
                 if key not in allowed or value is None:
@@ -218,7 +220,7 @@ class VectorStoreClient(BaseVectorStore):
                 
                 # Use root-level field for high-frequency filters (faster)
                 # Use metadata field for other filters (to avoid duplication)
-                filter_key = key if key in high_frequency_filters else f"metadata.{key}"
+                filter_key = key if key in HIGH_FREQUENCY_FILTERS else f"metadata.{key}"
                 
                 if isinstance(value, dict):
                     range_clause: Dict[str, Any] = {"range": {filter_key: {}}}
@@ -243,7 +245,7 @@ class VectorStoreClient(BaseVectorStore):
         return hits
 
     def delete_by_source_id(self, source_id: str) -> int:
-        index = self._config.index
+        index = self._get_index_name()
         # Delete documents associated to the property id via source_id only
         query = {
             "bool": {

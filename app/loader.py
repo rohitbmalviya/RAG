@@ -351,7 +351,6 @@ def load_documents(settings: Settings, batch_size: int) -> Generator[List[Docume
         return
     logger.error("Unsupported ingestion source_type='%s' or missing source_path", source_type)
 
-
 def load_document_by_id(settings: Settings, record_id: str) -> Optional[Document]:
     """
     Load a single record from the configured SQL database by id and build a Document

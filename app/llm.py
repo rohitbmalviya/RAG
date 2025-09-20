@@ -7,11 +7,9 @@ from .core.base import BaseLLM
 from .models import RetrievedChunk
 from .utils import get_logger
 
-
 def filter_retrieved_chunks(chunks: List[RetrievedChunk], min_score: float = 0.7) -> List[RetrievedChunk]:
     """Filter chunks based on relevance score (if available)."""
     return [c for c in chunks if getattr(c, "score", 1.0) >= min_score]
-
 
 class Conversation:
     def __init__(self):
@@ -45,16 +43,13 @@ class Conversation:
     def set_conversation_summary(self, summary: str):
         self.conversation_summary = summary
 
-
 LLM_PROVIDERS: Dict[str, Type["BaseLLMProvider"]] = {}
-
 
 def register_llm_provider(name: str) -> Callable[[Type["BaseLLMProvider"]], Type["BaseLLMProvider"]]:
     def decorator(cls: Type["BaseLLMProvider"]) -> Type["BaseLLMProvider"]:
         LLM_PROVIDERS[name.lower()] = cls
         return cls
     return decorator
-
 
 class BaseLLMProvider:
     def __init__(self, config: LLMConfig, api_key: Optional[str]) -> None:
@@ -74,7 +69,6 @@ class BaseLLMProvider:
 
     def generate(self, messages: List[Dict[str, str]]) -> str:
         raise NotImplementedError
-
 
 @register_llm_provider("google")
 class GoogleLLM(BaseLLMProvider):
@@ -104,7 +98,6 @@ class GoogleLLM(BaseLLMProvider):
             self._logger.error("Google generate_content failed: %s", exc)
             raise
 
-
 @register_llm_provider("openai")
 @register_llm_provider("azure_openai")
 class OpenAILLM(BaseLLMProvider):
@@ -131,7 +124,6 @@ class OpenAILLM(BaseLLMProvider):
         except Exception as exc:
             self._logger.error("OpenAI chat.completions.create failed: %s", exc)
             raise
-
 
 def is_greeting(query: str) -> bool:
     """Check if the query is a greeting"""
@@ -230,7 +222,6 @@ def extract_user_preferences_from_conversation(messages: List[Dict[str, str]]) -
                 preferences["furnishing_status"] = "semi-furnished"
     
     return preferences
-
 
 class LLMClient(BaseLLM):
     def __init__(self, config: LLMConfig, api_key: Optional[str]) -> None:
@@ -527,20 +518,23 @@ class LLMClient(BaseLLM):
         self.conversation.add_message("assistant", response)
         return response
 
-    def _build_context_prompt(self, user_input: str, retrieved_chunks: List[RetrievedChunk]) -> str:
-        """Build a context-aware prompt for property queries with conversation memory (Step 8)"""
-        # Get conversation context for short-term memory
-        conversation_history = self._get_conversation_context()
-        user_preferences = self.conversation.get_preferences()
-        
+    def _build_context_from_chunks(self, retrieved_chunks: List[RetrievedChunk]) -> str:
+        """Build context block from retrieved chunks (shared utility)"""
         context_lines: List[str] = []
         for idx, chunk in enumerate(retrieved_chunks, start=1):
             context_lines.append(f"[Source {idx}]")
             if chunk.text:
                 context_lines.append(chunk.text)
             context_lines.append("")
+        return "\n".join(context_lines)
 
-        context_block = "\n".join(context_lines)
+    def _build_context_prompt(self, user_input: str, retrieved_chunks: List[RetrievedChunk]) -> str:
+        """Build a context-aware prompt for property queries with conversation memory (Step 8)"""
+        # Get conversation context for short-term memory
+        conversation_history = self._get_conversation_context()
+        user_preferences = self.conversation.get_preferences()
+        
+        context_block = self._build_context_from_chunks(retrieved_chunks)
         
         # Enhanced instructions for Step 8 - Interactive conversation with memory
         instructions = (
@@ -612,14 +606,7 @@ class LLMClient(BaseLLM):
 
     def _build_best_property_prompt(self, user_input: str, retrieved_chunks: List[RetrievedChunk]) -> str:
         """Build a context-aware prompt for best property queries"""
-        context_lines: List[str] = []
-        for idx, chunk in enumerate(retrieved_chunks, start=1):
-            context_lines.append(f"[Source {idx}]")
-            if chunk.text:
-                context_lines.append(chunk.text)
-            context_lines.append("")
-
-        context_block = "\n".join(context_lines)
+        context_block = self._build_context_from_chunks(retrieved_chunks)
         
         instructions = (
             "You are LeaseOasis, a conversational UAE property leasing assistant.\n"
@@ -639,14 +626,7 @@ class LLMClient(BaseLLM):
 
     def _build_average_price_prompt(self, user_input: str, retrieved_chunks: List[RetrievedChunk]) -> str:
         """Build a context-aware prompt for average price queries"""
-        context_lines: List[str] = []
-        for idx, chunk in enumerate(retrieved_chunks, start=1):
-            context_lines.append(f"[Source {idx}]")
-            if chunk.text:
-                context_lines.append(chunk.text)
-            context_lines.append("")
-
-        context_block = "\n".join(context_lines)
+        context_block = self._build_context_from_chunks(retrieved_chunks)
         
         instructions = (
             "You are LeaseOasis, a conversational UAE property leasing assistant.\n"
@@ -956,7 +936,6 @@ class LLMClient(BaseLLM):
     def generate(self, prompt: str) -> str:
         """Fallback for BaseLLM compatibility."""
         return self._safe_generate([{"role": "user", "content": prompt}])
-
 
     def _safe_generate(self, messages: List[Dict[str, str]], retries: int = 2, delay: int = 1) -> str:
         """Call provider safely with retry logic."""

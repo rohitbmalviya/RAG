@@ -63,7 +63,6 @@ def _coerce_value_by_type(value: Any, field_type: str) -> Any:
     # keyword/text remain as-is (strings or lists)
     return value
 
-
 def extract_filters_with_llm(query: str, llm_client: LLMClient) -> Dict[str, Any]:
     """
     Use LLM to extract filters strictly limited to retrieval.filter_fields and
@@ -232,7 +231,6 @@ Output JSON:"""
     result = {k: v for k, v in result.items() if k in allowed_fields}
     
     return result
-
 
 def is_best_property_query(query: str) -> bool:
     """Check if the query is asking for 'best' properties"""

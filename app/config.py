@@ -155,7 +155,6 @@ class Settings(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     ingestion: IngestionConfig = Field(default_factory=IngestionConfig)
 
-
 def load_yaml_config(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
         raw = f.read()
@@ -210,7 +209,6 @@ def get_settings(config_path: Optional[str] = None) -> Settings:
     except Exception as _exc:
         logger.warning("Settings validation logging failed: %s", _exc)
     return settings
-
 
 def _log_missing_settings(settings: Settings) -> None:
     """Log warnings for missing or suspicious configuration values.

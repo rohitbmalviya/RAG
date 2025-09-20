@@ -45,5 +45,3 @@ class BaseVectorStore(ABC):
         Returns the number of deleted documents.
         """
         raise NotImplementedError
-
-

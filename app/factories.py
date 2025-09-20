@@ -20,5 +20,3 @@ def build_vector_store(cfg: VectorDBConfig) -> BaseVectorStore:
         return VectorStoreClient(cfg)
     # Future: add support for other providers implementing BaseVectorStore
     raise ValueError(f"Unsupported vector store provider: {cfg.provider}")
-
-

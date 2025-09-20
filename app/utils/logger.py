@@ -4,7 +4,6 @@ import os
 import sys
 from typing import Any, Dict, Optional
 
-
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:  # type: ignore[override]
         payload: Dict[str, Any] = {
@@ -17,7 +16,6 @@ class JsonFormatter(logging.Formatter):
         if record.exc_info:
             payload["exc_info"] = self.formatException(record.exc_info)
         return json.dumps(payload, ensure_ascii=False)
-
 
 def get_logger(name: Optional[str] = None, level: str = "INFO") -> logging.Logger:
     logger = logging.getLogger(name if name else __name__)

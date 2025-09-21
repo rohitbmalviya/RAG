@@ -2,10 +2,10 @@ from __future__ import annotations
 from typing import Dict, Tuple, Any, List
 import re
 import json
-from .llm import LLMClient, is_best_property_query, is_average_price_query
+from .llm import LLMClient
 from .config import get_settings
 
-def extract_basic_filters(query: str, llm_client: LLMClient) -> Dict[str, Any]:
+def extract_basic_filters(query: str) -> Dict[str, Any]:
     """
     Extract only the most basic filters using regex for performance.
     The comprehensive LLM extraction will handle everything else.
@@ -22,7 +22,7 @@ def extract_basic_filters(query: str, llm_client: LLMClient) -> Dict[str, Any]:
     # Bathrooms (very reliable pattern)
     bath_match = re.search(r"(\d+)\s*bath(room)?s?", q_lower)
     if bath_match:
-        filters["number_of_bathrooms"] = int(bath_match.group(1))
+        filters["number_of_bathrooms"] = int(bed_match.group(1))
 
     return filters
 
@@ -61,44 +61,22 @@ def _coerce_value_by_type(value: Any, field_type: str) -> Any:
     # keyword/text remain as-is (strings or lists)
     return value
 
-def extract_filters_with_llm(query: str, llm_client: LLMClient) -> Dict[str, Any]:
-    """
-    Use LLM to extract filters strictly limited to retrieval.filter_fields and
-    coerced to their types from database.field_types. Returns a dict suitable
-    for the retriever (supports exact, list, or range objects for numeric).
-    """
-    settings = get_settings()
-    allowed_fields: List[str] = list(settings.retrieval.filter_fields or [])
-    field_types: Dict[str, str] = dict(settings.database.field_types or {})
-
-    # First, apply basic regex extraction for simple patterns
-    filters = extract_basic_filters(query, llm_client)
-
-    schema_lines: List[str] = []
-    for f in allowed_fields:
-        ftype = field_types.get(f, "keyword")
-        if ftype in ("integer", "float"):
-            schema_lines.append(f"- {f} ({ftype}): number or range object {{'gte'|'lte'|'gt'|'lt'}}")
-        elif ftype == "boolean":
-            schema_lines.append(f"- {f} (boolean): true/false if explicitly implied")
-        else:
-            schema_lines.append(f"- {f} ({ftype}): string or list of strings")
-
-    prompt = f"""Extract property search filters from the user query for a UAE property RAG system.
+# Constants for LLM instructions - centralized for maintainability
+LLM_FILTER_EXTRACTION_INSTRUCTIONS = """Extract property search filters from the user query for a UAE property RAG system.
 Return ONLY a JSON object, no prose. If nothing found, return {{}}.
 
 AVAILABLE FIELDS:
-{chr(10).join(schema_lines)}
+{field_descriptions}
 
 === COMPREHENSIVE FILTER EXTRACTION GUIDE ===
 
-🏢 LOCATION FILTERS:
+LOCATION FILTERS:
 - EMIRATES: dubai, abu dhabi, sharjah, ajman, fujairah, ras al khaimah, umm al quwain
 - HIERARCHY: emirate > city > community > subcommunity
 - ABBREVIATIONS: JVC→jumeirah village circle, JBR→jumeirah beach residence, JLT→jumeirah lakes towers, DIFC→dubai international financial centre
 - EXAMPLES: "Dubai Marina" → {{"emirate":"dubai", "community":"dubai marina"}}
 
-🏠 PROPERTY TYPES:
+PROPERTY TYPES:
 - apartment/flat/condo → "apartment"
 - villa/house → "villa"  
 - studio → "studio"
@@ -107,24 +85,24 @@ AVAILABLE FIELDS:
 - penthouse → "penthouse"
 - office → "office"
 
-💰 FINANCIAL FILTERS:
+FINANCIAL FILTERS:
 - RENT: "under 100k"→{{"rent_charge":{{"lte":100000}}}}, "150k-200k"→{{"rent_charge":{{"gte":150000,"lte":200000}}}}
 - SECURITY DEPOSIT: "deposit 10k"→{{"security_deposit":{{"lte":10000}}}}
 - MAINTENANCE: "maintenance 5k"→{{"maintenance_charge":{{"lte":5000}}}}
 - CONVERSIONS: K=thousand, M=million
 
-🛏️ PROPERTY SPECS:
+PROPERTY SPECS:
 - BEDROOMS: "2 bedroom"→{{"number_of_bedrooms":2}}
 - BATHROOMS: "3 bathroom"→{{"number_of_bathrooms":3}}
 - SIZE: "1500 sqft"→{{"property_size":1500}}, "built 2020"→{{"year_built":2020}}
 
-🪑 FURNISHING & STATUS:
+FURNISHING & STATUS:
 - FURNISHING: "furnished"/"semi-furnished"/"unfurnished"
 - PROPERTY STATUS: "listed"/"active"/"draft"/"review"
 - RENT TYPE: "lease"/"holiday home ready"/"management fees"
 - MAINTENANCE: "owner"/"tenant"/"shared" (maintenance_covered_by)
 
-⭐ VERIFICATION & BOOSTING (CRITICAL - Extract these based on user intent):
+VERIFICATION & BOOSTING (CRITICAL - Extract these based on user intent):
 - VERIFIED PROPERTY: "verified property", "verified listings" → {{"bnb_verification_status":"verified"}}
 - PREMIUM PROPERTY: "premium property", "premium listings", "premium" → {{"premiumBoostingStatus":"Active"}}
 - PRIME PROPERTY: "prime property", "prime listings", "prime" → {{"carouselBoostingStatus":"Active"}}
@@ -136,7 +114,7 @@ IMPORTANT:
 - When user says "verified" → use bnb_verification_status: "verified"
 - When user says "best" → use both verified + premium boosting
 
-🏊 AMENITIES (Boolean - set to true if mentioned):
+AMENITIES (Boolean - set to true if mentioned):
 - GYM: gym, fitness → gym_fitness_center
 - POOL: pool, swimming → swimming_pool  
 - PARKING: parking → parking
@@ -160,12 +138,12 @@ IMPORTANT:
 - SUBLEASE: sublease allowed → sublease_allowed
 - CHILDREN: kids play area → childrens_play_area
 
-📅 DATE FILTERS (format as YYYY-MM-DD):
+DATE FILTERS (format as YYYY-MM-DD):
 - AVAILABLE: "available from Jan 2025"→{{"available_from":"2025-01-01"}}
 - LEASE START: "lease starts March"→{{"lease_start_date":"2025-03-01"}}
 - LEASE END: "lease ends Dec 2025"→{{"lease_end_date":"2025-12-31"}}
 
-🏗️ DEVELOPER & DETAILS:
+DEVELOPER & DETAILS:
 - DEVELOPER: "Emaar", "Nakheel", "Damac" → developer_name
 - LEASE DURATION: "1 year", "6 months", "2 years" → lease_duration
 - FLOOR: "5th floor", "ground floor" → floor_level
@@ -183,77 +161,73 @@ User query: {query}
 
 Output JSON:"""
 
-    raw = llm_client.generate(prompt).strip()
-    
-    def _safe_json_parse(text: str) -> Dict[str, Any]:
-        """Safely parse JSON with multiple fallback strategies."""
-        try:
-            return json.loads(text)
-        except Exception:
-            pass
-        return {}
+# Boosting status fields that preserve case
+BOOSTING_FIELDS = {"bnb_verification_status", "premiumBoostingStatus", "carouselBoostingStatus"}
 
-    def _json_from_text(text: str) -> Dict[str, Any]:
-        # Try direct JSON parsing first
-        result = _safe_json_parse(text)
+def _safe_json_parse(text: str) -> Dict[str, Any]:
+    """Safely parse JSON with multiple fallback strategies."""
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    return {}
+
+def _json_from_text(text: str) -> Dict[str, Any]:
+    """Extract JSON from text with multiple fallback strategies."""
+    # Try direct JSON parsing first
+    result = _safe_json_parse(text)
+    if result:
+        return result  
+    # Strip common markdown code fences
+    if text.startswith("```") and text.endswith("```"):
+        inner = text.strip().strip("`")
+        # handle ```json ... ```
+        lines = inner.split("\n", 1)
+        if len(lines) == 2 and lines[0].strip().lower().startswith("json"):
+            result = _safe_json_parse(lines[1])
+            if result:
+                return result 
+    # Fallback: best-effort find first JSON object
+    import re as _re
+    m = _re.search(r"\{[\s\S]*\}", text)
+    if m:
+        result = _safe_json_parse(m.group(0))
         if result:
             return result
-        
-        # Strip common markdown code fences
-        if text.startswith("```") and text.endswith("```"):
-            inner = text.strip().strip("`")
-            # handle ```json ... ```
-            lines = inner.split("\n", 1)
-            if len(lines) == 2 and lines[0].strip().lower().startswith("json"):
-                result = _safe_json_parse(lines[1])
-                if result:
-                    return result
-        
-        # Fallback: best-effort find first JSON object
-        import re as _re
-        m = _re.search(r"\{[\s\S]*\}", text)
-        if m:
-            result = _safe_json_parse(m.group(0))
-            if result:
-                return result
-        
-        return {}
-
-    llm_data = _json_from_text(raw)
-
-    # Merge hybrid filters with LLM results (LLM takes precedence for conflicts)
-    result = filters.copy()
     
-    def _normalize_string_value(value: Any, field_type: str) -> Any:
-        """Normalize string values based on field type."""
-        if not isinstance(value, (str, list)):
-            return value
-        
-        if isinstance(value, str):
-            value = value.strip()
-            if field_type in ("keyword", "text"):
-                return value.lower()
-            return value
-        elif isinstance(value, list):
-            if field_type in ("keyword", "text"):
-                return [str(item).lower() for item in value]
-            return value
+    return {}
+
+def _normalize_string_value(value: Any, field_type: str, field_name: str = "") -> Any:
+    """Normalize string values based on field type."""
+    if not isinstance(value, (str, list)):
         return value
+    
+    if isinstance(value, str):
+        value = value.strip()
+        if field_type in ("keyword", "text") and field_name not in BOOSTING_FIELDS:
+            return value.lower()
+        return value
+    elif isinstance(value, list):
+        if field_type in ("keyword", "text") and field_name not in BOOSTING_FIELDS:
+            return [str(item).lower() for item in value]
+        return value
+    return value
 
-    # Process LLM results and merge
-    for key, value in llm_data.items():
-        if key not in allowed_fields:
-            continue
-        ftype = field_types.get(key, "")
-        normalized_value = _normalize_string_value(value, ftype)
-        coerced = _coerce_value_by_type(normalized_value, ftype)
-        if coerced is not None:
-            result[key] = coerced
+def _build_field_descriptions(settings) -> str:
+    """Build field descriptions dynamically from configuration."""
+    allowed_fields = list(settings.retrieval.filter_fields or [])
+    field_types = dict(settings.database.field_types or {})
+    schema_lines: List[str] = []
+    for f in allowed_fields:
+        ftype = field_types.get(f, "keyword")
+        if ftype in ("integer", "float"):
+            schema_lines.append(f"- {f} ({ftype}): number or range object {{'gte'|'lte'|'gt'|'lt'}}")
+        elif ftype == "boolean":
+            schema_lines.append(f"- {f} (boolean): true/false if explicitly implied")
+        else:
+            schema_lines.append(f"- {f} ({ftype}): string or list of strings")
     
-    # Filter to only allowed fields
-    result = {k: v for k, v in result.items() if k in allowed_fields}
-    
-    return result
+    return "\n".join(schema_lines)
 
 def extract_filters_with_llm_context_aware(query: str, llm_client: LLMClient) -> Dict[str, Any]:
     """
@@ -261,89 +235,29 @@ def extract_filters_with_llm_context_aware(query: str, llm_client: LLMClient) ->
     This function uses dynamic configuration and scales to any property schema.
     """
     settings = get_settings()
-    allowed_fields: List[str] = list(settings.retrieval.filter_fields or [])
-    field_types: Dict[str, str] = dict(settings.database.field_types or {})
-
+    allowed_fields = list(settings.retrieval.filter_fields or [])
+    field_types = dict(settings.database.field_types or {})
     # Get conversation context
     conversation_context = _get_conversation_context(llm_client)
     user_preferences = _get_user_preferences(llm_client)
-    
     # First, apply basic regex extraction for simple patterns
-    filters = extract_basic_filters(query, llm_client)
-
-    # Get dynamic field mappings from configuration
-    field_mappings = _get_dynamic_field_mappings(settings)
-    
+    filters = extract_basic_filters(query)
     # Build dynamic prompt based on actual schema
-    prompt = _build_dynamic_extraction_prompt(conversation_context, user_preferences, field_mappings, query)
-
+    prompt = _build_dynamic_extraction_prompt(conversation_context, user_preferences, settings, query)
     raw = llm_client.generate(prompt).strip()
-    
-    def _safe_json_parse(text: str) -> Dict[str, Any]:
-        """Safely parse JSON with multiple fallback strategies."""
-        try:
-            return json.loads(text)
-        except Exception:
-            pass
-        return {}
-
-    def _json_from_text(text: str) -> Dict[str, Any]:
-        # Try direct JSON parsing first
-        result = _safe_json_parse(text)
-        if result:
-            return result
-        
-        # Strip common markdown code fences
-        if text.startswith("```") and text.endswith("```"):
-            inner = text.strip().strip("`")
-            # handle ```json ... ```
-            lines = inner.split("\n", 1)
-            if len(lines) == 2 and lines[0].strip().lower().startswith("json"):
-                result = _safe_json_parse(lines[1])
-                if result:
-                    return result
-        
-        # Fallback: best-effort find first JSON object
-        import re as _re
-        m = _re.search(r"\{[\s\S]*\}", text)
-        if m:
-            result = _safe_json_parse(m.group(0))
-            if result:
-                return result
-        
-        return {}
-
     llm_data = _json_from_text(raw)
-
     # Merge hybrid filters with LLM results (LLM takes precedence for conflicts)
     result = filters.copy()
-    
-    def _normalize_string_value(value: Any, field_type: str) -> Any:
-        """Normalize string values based on field type."""
-        if not isinstance(value, (str, list)):
-            return value
-        
-        if isinstance(value, str):
-            value = value.strip()
-            if field_type in ("keyword", "text"):
-                return value.lower()
-            return value
-        elif isinstance(value, list):
-            if field_type in ("keyword", "text"):
-                return [str(item).lower() for item in value]
-            return value
-        return value
 
     # Process LLM results and merge
     for key, value in llm_data.items():
         if key not in allowed_fields:
             continue
         ftype = field_types.get(key, "")
-        normalized_value = _normalize_string_value(value, ftype)
+        normalized_value = _normalize_string_value(value, ftype, key)
         coerced = _coerce_value_by_type(normalized_value, ftype)
         if coerced is not None:
             result[key] = coerced
-    
     # Filter to only allowed fields
     result = {k: v for k, v in result.items() if k in allowed_fields}
     
@@ -404,94 +318,21 @@ def _build_context_section(conversation_context: str, user_preferences: Dict[str
     
     return ""
 
-def _get_dynamic_field_mappings(settings) -> Dict[str, str]:
-    """
-    Get field mappings dynamically from configuration.
-    This makes the system scalable to any property schema.
-    """
-    field_types = settings.database.field_types or {}
-    filter_fields = settings.retrieval.filter_fields or []
-    
-    # Build dynamic mappings based on configuration
-    mappings = {}
-    
-    for field in filter_fields:
-        field_type = field_types.get(field, "keyword")
-        mappings[field] = field_type
-    
-    return mappings
 
 def _build_dynamic_extraction_prompt(conversation_context: str, user_preferences: Dict[str, Any], 
-                                   field_mappings: Dict[str, str], query: str) -> str:
+                                   settings, query: str) -> str:
     """
     Build a dynamic extraction prompt based on the actual database schema.
     This approach scales to any property field configuration.
     """
     context_section = _build_context_section(conversation_context, user_preferences)
+    field_descriptions = _build_field_descriptions(settings)
     
-    # Build field descriptions dynamically
-    field_descriptions = []
-    for field, field_type in field_mappings.items():
-        if field_type in ("integer", "float"):
-            field_descriptions.append(f"- {field} ({field_type}): number or range object {{'gte'|'lte'|'gt'|'lt'}}")
-        elif field_type == "boolean":
-            field_descriptions.append(f"- {field} (boolean): true/false if explicitly implied")
-        else:
-            field_descriptions.append(f"- {field} ({field_type}): string or list of strings")
-    
-    prompt = f"""Extract property search filters from the user query for a UAE property RAG system.
-Return ONLY a JSON object, no prose. If nothing found, return {{}}.
-
-{context_section}
-
-AVAILABLE FIELDS (dynamically configured):
-{chr(10).join(field_descriptions)}
-
-=== DYNAMIC EXTRACTION GUIDE ===
-
-🏢 LOCATION FILTERS:
-- Extract any UAE emirate, city, community, or subcommunity mentioned
-- Examples: "Dubai Marina" → {{"emirate":"dubai", "community":"dubai marina"}}
-
-💰 FINANCIAL FILTERS:
-- Extract rent_charge, security_deposit, maintenance_charge as range objects
-- Examples: "under 100k" → {{"rent_charge":{{"lte":100000}}}}
-
-🛏️ PROPERTY SPECS:
-- Extract number_of_bedrooms, number_of_bathrooms, property_size, year_built
-- Examples: "2 bedroom" → {{"number_of_bedrooms":2}}
-
-🪑 FURNISHING & STATUS:
-- Extract furnishing_status, property_status, rent_type, maintenance_covered_by
-- Examples: "furnished" → {{"furnishing_status":"furnished"}}
-
-⭐ VERIFICATION & BOOSTING (CRITICAL - Extract these based on user intent):
-- Extract bnb_verification_status, premiumBoostingStatus, carouselBoostingStatus
-- Examples: 
-  - "verified property", "verified listings", "verified" → {{"bnb_verification_status":"verified"}}
-  - "premium property", "premium listings", "premium" → {{"premiumBoostingStatus":"Active"}}
-  - "prime property", "prime listings", "prime" → {{"carouselBoostingStatus":"Active"}}
-  - "best property", "best listings", "top property", "recommended" → {{"bnb_verification_status":"verified", "premiumBoostingStatus":"Active"}}
-
-CRITICAL RULES:
-- When user mentions "prime" → ALWAYS use carouselBoostingStatus: "Active"
-- When user mentions "premium" → ALWAYS use premiumBoostingStatus: "Active"  
-- When user mentions "verified" → ALWAYS use bnb_verification_status: "verified"
-- When user mentions "best", "top", "recommended" → ALWAYS use both verified + premium boosting
-
-🏊 AMENITIES (Boolean fields):
-- Extract any boolean amenity fields mentioned
-- Examples: "pool" → {{"swimming_pool":true}}
-
-📅 DATE FILTERS:
-- Extract date fields as range objects
-- Examples: "available from Jan 2025" → {{"available_from":{{"gte":"2025-01-01"}}}}
-
-User Query: {query}
-
-Output JSON:"""
-    
-    return prompt
+    return LLM_FILTER_EXTRACTION_INSTRUCTIONS.format(
+        field_descriptions=field_descriptions,
+        context_section=context_section,
+        query=query
+    )
 
 def preprocess_query(query: str, llm_client: LLMClient) -> Tuple[str, Dict[str, Any]]:
     """
@@ -500,6 +341,7 @@ def preprocess_query(query: str, llm_client: LLMClient) -> Tuple[str, Dict[str, 
     """
     # Extract filters with conversation context - LLM handles everything
     filters = extract_filters_with_llm_context_aware(query, llm_client)
-    
+
     print("filters", filters)
+    
     return query, filters

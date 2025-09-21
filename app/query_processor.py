@@ -124,10 +124,17 @@ AVAILABLE FIELDS:
 - RENT TYPE: "lease"/"holiday home ready"/"management fees"
 - MAINTENANCE: "owner"/"tenant"/"shared" (maintenance_covered_by)
 
-⭐ VERIFICATION & BOOSTING:
-- VERIFIED: "verified"→{{"bnb_verification_status":"verified"}}
-- PREMIUM: "premium"→{{"premiumBoostingStatus":"Active"}}
-- PRIME: "prime"→{{"carouselBoostingStatus":"Active"}}
+⭐ VERIFICATION & BOOSTING (CRITICAL - Extract these based on user intent):
+- VERIFIED PROPERTY: "verified property", "verified listings" → {{"bnb_verification_status":"verified"}}
+- PREMIUM PROPERTY: "premium property", "premium listings", "premium" → {{"premiumBoostingStatus":"Active"}}
+- PRIME PROPERTY: "prime property", "prime listings", "prime" → {{"carouselBoostingStatus":"Active"}}
+- BEST PROPERTY: "best property", "best listings", "top property", "recommended" → {{"bnb_verification_status":"verified", "premiumBoostingStatus":"Active"}}
+
+IMPORTANT: 
+- When user says "prime" → use carouselBoostingStatus: "Active"
+- When user says "premium" → use premiumBoostingStatus: "Active"  
+- When user says "verified" → use bnb_verification_status: "verified"
+- When user says "best" → use both verified + premium boosting
 
 🏊 AMENITIES (Boolean - set to true if mentioned):
 - GYM: gym, fitness → gym_fitness_center
@@ -164,12 +171,13 @@ AVAILABLE FIELDS:
 - FLOOR: "5th floor", "ground floor" → floor_level
 
 EXTRACTION RULES:
-1. Use lowercase for all string values
+1. Use lowercase for all string values EXCEPT boosting status fields (use "Active" with capital A)
 2. Only extract explicitly mentioned filters
 3. For ranges, use gte/lte: {{"field":{{"gte":min,"lte":max}}}}
 4. Boolean amenities: set to true only if clearly mentioned
 5. Dates: convert to YYYY-MM-DD format
 6. Don't invent values - only extract what's clearly stated
+7. CRITICAL: Follow the exact boosting status mappings above - "prime"→carouselBoostingStatus, "premium"→premiumBoostingStatus, "verified"→bnb_verification_status, "best"→both verified+premium
 
 User query: {query}
 
@@ -457,9 +465,19 @@ AVAILABLE FIELDS (dynamically configured):
 - Extract furnishing_status, property_status, rent_type, maintenance_covered_by
 - Examples: "furnished" → {{"furnishing_status":"furnished"}}
 
-⭐ VERIFICATION & BOOSTING:
+⭐ VERIFICATION & BOOSTING (CRITICAL - Extract these based on user intent):
 - Extract bnb_verification_status, premiumBoostingStatus, carouselBoostingStatus
-- Examples: "verified" → {{"bnb_verification_status":"verified"}}
+- Examples: 
+  - "verified property", "verified listings", "verified" → {{"bnb_verification_status":"verified"}}
+  - "premium property", "premium listings", "premium" → {{"premiumBoostingStatus":"Active"}}
+  - "prime property", "prime listings", "prime" → {{"carouselBoostingStatus":"Active"}}
+  - "best property", "best listings", "top property", "recommended" → {{"bnb_verification_status":"verified", "premiumBoostingStatus":"Active"}}
+
+CRITICAL RULES:
+- When user mentions "prime" → ALWAYS use carouselBoostingStatus: "Active"
+- When user mentions "premium" → ALWAYS use premiumBoostingStatus: "Active"  
+- When user mentions "verified" → ALWAYS use bnb_verification_status: "verified"
+- When user mentions "best", "top", "recommended" → ALWAYS use both verified + premium boosting
 
 🏊 AMENITIES (Boolean fields):
 - Extract any boolean amenity fields mentioned
@@ -478,21 +496,10 @@ Output JSON:"""
 def preprocess_query(query: str, llm_client: LLMClient) -> Tuple[str, Dict[str, Any]]:
     """
     Preprocess query using LLM-only filter extraction restricted to configured fields.
-    Now includes conversation context for better filter extraction.
+    The LLM handles all logic including boosting status mappings and case normalization.
     """
-    # Extract filters with conversation context
+    # Extract filters with conversation context - LLM handles everything
     filters = extract_filters_with_llm_context_aware(query, llm_client)
-    
-    def _add_best_property_boosts(filters: Dict[str, Any]) -> None:
-        """Add verification and boosting filters for best property queries."""
-        if "bnb_verification_status" not in filters:
-            filters["bnb_verification_status"] = "verified"
-        if "premiumBoostingStatus" not in filters:
-            filters["premiumBoostingStatus"] = "Active"
-
-    # Add special handling for "best property" queries
-    if is_best_property_query(query):
-        _add_best_property_boosts(filters)
     
     print("filters", filters)
     return query, filters

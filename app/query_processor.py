@@ -145,8 +145,21 @@ DATE FILTERS (format as YYYY-MM-DD):
 
 DEVELOPER & DETAILS:
 - DEVELOPER: "Emaar", "Nakheel", "Damac" → developer_name
-- LEASE DURATION: "1 year", "6 months", "2 years" → lease_duration
+- LEASE DURATION: "1 year", "6 months", "2 years", "12-month" → lease_duration
 - FLOOR: "5th floor", "ground floor" → floor_level
+- PLOT NUMBER: "plot 123" → plot_number
+- UNIT NUMBER: "unit 456", "apartment 789" → apartment_unit_number
+
+ENHANCED LOCATION EXTRACTION:
+- NEARBY LANDMARKS: "near metro", "close to mall", "near Sheikh Zayed Road" → nearby_landmarks
+- TRANSPORT: "metro access", "bus station nearby" → public_transport_type
+- BEACH ACCESS: "beach front", "near beach" → beach_access
+
+ENHANCED AMENITY EXTRACTION:
+- PRIVATE POOL: "private pool", "own pool" → swimming_pool with private indicator
+- SHARED POOL: "shared pool", "community pool" → swimming_pool with shared indicator
+- PARKING DETAILS: "3 parking", "covered parking" → parking with details
+- FURNISHING DETAILS: "fully furnished", "partially furnished" → furnishing_status
 
 EXTRACTION RULES:
 1. Use lowercase for all string values EXCEPT boosting status fields (use "Active" with capital A)

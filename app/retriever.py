@@ -123,8 +123,8 @@ class Retriever:
         Calculate attribute priority score based on Step 7 requirements.
         Prioritizes context retrieval based on user preferences and attribute importance.
         Priority Order (as specified in Step 7):
-        1. Location (emirate, city, community) - Highest Priority
-        2. Budget (rent_charge) - High Priority  
+        1. Location (emirate, city, community, subcommunity, nearby_landmarks) - Highest Priority
+        2. Budget (rent_charge, security_deposit, maintenance_charge) - High Priority  
         3. Property Type - High Priority
         4. Bedrooms/Bathrooms - Medium-High Priority
         5. Furnishing Status - Medium Priority
@@ -137,15 +137,24 @@ class Retriever:
             
         attribute_score = 0.0
         
-        # 1. Location Priority (Highest - 0.25 max)
+        # 1. Location Priority (Highest - 0.30 max) - Enhanced with more location fields
         location_scores = [
-            ("emirate", 0.15),
+            ("emirate", 0.20),           # Increased weight for emirate
             ("city", 0.05),
-            ("community", 0.05)
+            ("community", 0.05),
+            ("subcommunity", 0.03)       # Added subcommunity support
         ]
         location_match = self._calculate_location_score(metadata, filters, location_scores)
         attribute_score += location_match
-        # 2. Budget Priority (High - 0.15 max)
+        
+        # Enhanced location scoring with nearby_landmarks and transport
+        if "nearby_landmarks" in filters and metadata.get("nearby_landmarks"):
+            # Check for landmark matches in text
+            filter_landmarks = str(filters["nearby_landmarks"]).lower()
+            property_landmarks = str(metadata.get("nearby_landmarks", "")).lower()
+            if filter_landmarks in property_landmarks:
+                attribute_score += 0.02  # Small bonus for landmark match
+        # 2. Budget Priority (High - 0.18 max) - Enhanced with security deposit and maintenance
         if "rent_charge" in filters:
             filter_budget = filters["rent_charge"]
             property_rent = metadata.get("rent_charge")
@@ -159,6 +168,19 @@ class Retriever:
                             attribute_score += 0.15
                         elif budget_ratio <= 1.0:  # Within budget
                             attribute_score += 0.10
+                        else:
+                            # Over budget but within 20% gets small penalty reduction
+                            if budget_ratio <= 1.2:
+                                attribute_score += 0.05
+        
+        # Security deposit and maintenance charge considerations
+        if "security_deposit" in filters and metadata.get("security_deposit"):
+            # Bonus for reasonable security deposit (within 20% of typical range)
+            attribute_score += 0.02
+        
+        if "maintenance_charge" in filters and metadata.get("maintenance_charge"):
+            # Small bonus for maintenance charge availability
+            attribute_score += 0.01
                         
         # 3. Property Type Priority (High - 0.12 max)
         if self._check_filter_match(metadata, filters, "property_type_id"):
@@ -193,4 +215,4 @@ class Retriever:
                 # Simple date comparison - exact match gets points
                 if property_date <= filter_date:  # Available by requested date
                     attribute_score += 0.02
-        return min(0.25, attribute_score)  # Cap at 0.25 to prevent over-boosting
+        return min(0.30, attribute_score)  # Cap at 0.30 to prevent over-boosting (increased for enhanced scoring)

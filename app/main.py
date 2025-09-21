@@ -8,7 +8,7 @@ from .chunking import chunk_documents
 from .config import Settings, get_settings
 from .core.base import BaseEmbedder, BaseVectorStore, BaseLLM
 from .loader import load_documents, load_document_by_id
-from .llm import filter_retrieved_chunks, is_property_query, extract_user_preferences_hybrid
+from .llm import LLMClient
 from .models import RetrievedChunk
 from .retriever import Retriever
 from .utils import get_logger
@@ -131,7 +131,6 @@ async def query_endpoint(request: QueryRequest) -> QueryResponse:
         raise HTTPException(status_code=500, detail=SERVER_NOT_INITIALIZED)
     if not request.query or not request.query.strip():
         raise HTTPException(status_code=400, detail="Query must not be empty")
-    
     # Get or create session with proper LLM client initialization
     session_id = request.session_id or "default"
     if session_id not in conversation_sessions:
@@ -141,30 +140,23 @@ async def query_endpoint(request: QueryRequest) -> QueryResponse:
         conversation_sessions[session_id] = llm_client
     else:
         llm_client = conversation_sessions[session_id]
-    
-    # Update user preferences from conversation before processing query using hybrid approach
-    preferences = extract_user_preferences_hybrid(llm_client.conversation.get_messages(), llm_client)
-    llm_client.conversation.update_preferences(preferences)
-    
+    # Process query using dynamic LLM approach
     normalized_query, filters = preprocess_query(request.query, llm_client)
-    
-    # Check if it's a property query
-    if is_property_query(normalized_query):
-        chunks: List[RetrievedChunk] = pipeline_state.retriever_client.retrieve(
-            normalized_query,
-            filters=filters,
-            top_k=request.top_k,
-        )
-        answer = llm_client.chat(normalized_query, retrieved_chunks=chunks)
-        filtered_chunks = filter_retrieved_chunks(chunks, min_score=0.7)
-        sources: List[SourceItem] = [
-            SourceItem(score=c.score, text=c.text, metadata=c.metadata)
-            for c in filtered_chunks
-        ]
-        return QueryResponse(answer=answer, sources=sources)
-    else:
-        answer = llm_client.chat(normalized_query)
-        return QueryResponse(answer=answer, sources=[])
+    # Retrieve chunks for property queries
+    chunks: List[RetrievedChunk] = pipeline_state.retriever_client.retrieve(
+        normalized_query,
+        filters=filters,
+        top_k=request.top_k,
+    )
+    # Use dynamic LLM chat method which handles classification internally
+    answer = llm_client.chat(normalized_query, retrieved_chunks=chunks)
+    # Filter chunks by score and create sources
+    filtered_chunks = [c for c in chunks if getattr(c, "score", 1.0) >= 0.7]
+    sources: List[SourceItem] = [
+        SourceItem(score=c.score, text=c.text, metadata=c.metadata)
+        for c in filtered_chunks
+    ]
+    return QueryResponse(answer=answer, sources=sources)
 
 def _validate_components() -> None:
     """Validate that all required components are initialized"""

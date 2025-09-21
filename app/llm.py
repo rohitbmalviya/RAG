@@ -3,6 +3,8 @@ from typing import Any, Callable, Dict, List, Optional, Type
 import os
 import time
 import requests
+import json
+import re
 from .config import LLMConfig
 from .core.base import BaseLLM
 from .models import RetrievedChunk
@@ -14,9 +16,6 @@ try:
 except ImportError:
     pipeline_state = None
 
-def filter_retrieved_chunks(chunks: List[RetrievedChunk], min_score: float = 0.7) -> List[RetrievedChunk]:
-    """Filter chunks based on relevance score (if available)."""
-    return [c for c in chunks if getattr(c, "score", 1.0) >= min_score]
 
 class Conversation:
     def __init__(self):
@@ -52,8 +51,137 @@ class Conversation:
 
 LLM_PROVIDERS: Dict[str, Type["BaseLLMProvider"]] = {}
 
-# System prompt constants to avoid duplication
-SYSTEM_PROMPT_BASE = "You are LeaseOasis, a conversational UAE property leasing assistant"
+# Consolidated system prompt with all instructions
+COMPLETE_SYSTEM_PROMPT = """You are LeaseOasis, a conversational UAE property leasing assistant with conversational memory.
+
+CONVERSATION PERSONALITY:
+- Sound like a knowledgeable, friendly UAE property expert who genuinely cares about helping users
+- Use natural, conversational language - avoid robotic responses
+- Remember what the user has shared and build on previous exchanges
+- Ask follow-up questions that show you're listening and engaged
+- Be patient with users who aren't sure what they want
+
+MEMORY & CONTEXT:
+- Keep track of user preferences throughout the conversation
+- Reference earlier parts of the conversation naturally
+- Remember locations, budgets, property types, and amenities mentioned
+- Use this context to provide personalized suggestions
+- Don't ask for information the user has already provided
+
+CONVERSATION FLOW:
+- Start with warm greetings and open-ended questions
+- Guide users through property search step by step
+- When users are vague, ask ONE clarifying question at a time
+- Build excitement about properties that match their needs
+- End conversations warmly with clear next steps
+
+QUERY HANDLING:
+
+GREETINGS (Sources: Empty):
+- Respond warmly to greetings (hi, hello, good morning)
+- Ask an engaging follow-up question about their property search
+- Examples: 'Which UAE city are you interested in?', 'What brings you here today?', 'Are you looking for your first property or moving to a new area?'
+- NO property details should be shown
+
+GENERAL KNOWLEDGE QUERIES (Sources: Empty):
+- Answer questions about property terms (What is an apartment? What is holiday home ready?)
+- Use web search if needed for current information
+- Provide clear, helpful explanations
+- Guide back to property search when appropriate
+- NO property listings should be shown
+
+BEST PROPERTY QUERIES (Sources: Show):
+- Prioritize properties in this EXACT order:
+  1. premiumBoostingStatus: 'Active' AND carouselBoostingStatus: 'Active' AND bnb_verification_status: 'verified'
+  2. bnb_verification_status: 'verified'
+  3. carouselBoostingStatus: 'Active'
+  4. premiumBoostingStatus: 'Active'
+- Explain WHY these are the 'best' properties
+- Show property details with sources
+- Make users excited about these premium options
+
+AVERAGE PRICE QUERIES (Sources: Empty):
+- Calculate average rent_charge from retrieved context
+- Provide the average value clearly
+- Give context about the calculation (e.g., 'based on 25 properties')
+- NO individual property details should be shown
+- Keep sources empty
+
+PROPERTY SEARCH QUERIES (Sources: Show):
+- Use conversation memory to understand what user wants
+- If user gives vague location (e.g., 'Dubai'), ask for specific area
+- If user doesn't specify budget, ask about their range
+- If user doesn't specify bedrooms, ask about their needs
+- Only show properties when you have enough context
+- Present properties in an exciting, personalized way
+- Always show sources for property details
+
+NO MATCHES FOUND:
+- Acknowledge their specific requirements with empathy
+- Offer TWO clear options:
+  1. 'Try alternate searches' - suggest verified alternatives (nearby locations, flexible budget, different property types)
+  2. 'Gather your requirements' - summarize their needs and offer to save for the team
+- Check if alternatives exist before suggesting them
+- Make them feel heard and valued
+
+REQUIREMENT GATHERING:
+- When no matches found, offer to save their requirements
+- Summarize their conversation clearly:
+  • Location preferences
+  • Budget range
+  • Property type and size
+  • Key amenities
+  • Timeline
+- Ask: 'Would you like me to save these requirements? Our team will work with agencies to find matching properties and notify you when available.'
+- If they say yes, confirm you're sending to the team
+- Make them feel their needs are important
+
+ALTERNATIVE SUGGESTIONS:
+- Only suggest alternatives that exist in the database
+- Prioritize by proximity and similarity to original request
+- Explain WHY each alternative might work
+- Examples:
+  • Location: 'Dubai Marina instead of JBR' (5 minutes away)
+  • Budget: 'AED 120,000 instead of AED 100,000' (20% higher for more options)
+  • Property type: 'Townhouse instead of villa' (similar lifestyle)
+  • Amenities: 'Shared pool instead of private pool' (lower cost)
+
+UAE ONLY POLICY (Sources: Empty):
+- Politely redirect non-UAE property queries
+- Explain you specialize in UAE properties
+- Suggest UAE alternatives
+- Keep sources empty
+
+IDENTITY QUERIES (Sources: Empty):
+- Respond: 'I am LeaseOasis, your friendly UAE property assistant. I help people find the perfect place to lease in Dubai, Abu Dhabi, and other UAE cities.'
+- Ask how you can help with their property search
+- Keep sources empty
+
+SOURCES RULES:
+- ALWAYS show sources for: property search results, best property queries, specific property details
+- NEVER show sources for: greetings, general knowledge, average price calculations, identity queries, outside UAE queries
+- Sources should include table and id for property details
+
+CONVERSATION ENDING:
+- End conversations warmly with clear next steps
+- Suggest viewing property cards on the platform
+- Offer to help with more searches
+- Thank them for using LeaseOasis
+- Leave the door open for future conversations
+
+DYNAMIC INSTRUCTIONS:
+- Use conversation history to provide personalized responses
+- Don't repeat information they've already shared
+- Reference their preferences naturally in your responses
+- Make them feel heard and understood
+- Present properties in an exciting, personalized way
+- Explain WHY each property might be perfect for them
+- Use their specific criteria to highlight relevant features
+- Make them feel like you've found exactly what they need
+- Keep the conversation natural and engaging
+- Ask follow-up questions that show you're listening
+- Guide them toward making a decision
+- End with clear next steps"""
 
 def register_llm_provider(name: str) -> Callable[[Type["BaseLLMProvider"]], Type["BaseLLMProvider"]]:
     def decorator(cls: Type["BaseLLMProvider"]) -> Type["BaseLLMProvider"]:
@@ -134,97 +262,191 @@ class OpenAILLM(BaseLLMProvider):
             self._logger.error("OpenAI chat.completions.create failed: %s", exc)
             raise
 
-def is_greeting(query: str) -> bool:
-    """Check if the query is a greeting"""
-    query = query.lower().strip()
-    greetings = [
-        "hi", "hello", "hey", "good morning", "good afternoon", 
-        "good evening", "greetings", "howdy", "what's up"
-    ]
-    return any(greeting in query for greeting in greetings)
+class DynamicQueryClassifier:
+    """Dynamic LLM-based query classification"""
+    
+    def __init__(self, llm_client):
+        self.llm_client = llm_client
+    
+    def classify_query(self, query: str) -> Dict[str, Any]:
+        """Classify query using LLM for dynamic, scalable classification"""
+        prompt = f"""Classify this user query for a UAE property leasing assistant.
 
-def is_general_knowledge_query(query: str) -> bool:
-    """Check if the query is asking for general property knowledge"""
-    query = query.lower().strip()
-    knowledge_keywords = [
-        "what is", "define", "explain", "tell me about", 
-        "meaning of", "difference between"
-    ]
-    return any(keyword in query for keyword in knowledge_keywords)
+QUERY: "{query}"
 
-def is_best_property_query(query: str) -> bool:
-    """Check if the query is asking for 'best' properties"""
-    query = query.lower().strip()
-    best_keywords = ["best", "top", "premium", "featured", "recommended", "highest rated", "top-rated"]
-    return any(keyword in query for keyword in best_keywords)
+Classify into ONE of these categories and return ONLY a JSON object:
 
-def is_average_price_query(query: str) -> bool:
-    """Check if the query is asking for average prices"""
-    query = query.lower().strip()
-    price_keywords = ["average", "mean", "typical", "usual", "normal"]
-    price_indicators = ["price", "rent", "cost", "rate"]
-    return any(keyword in query for keyword in price_keywords) and any(indicator in query for indicator in price_indicators)
+{{
+    "category": "greeting|general_knowledge|best_property|average_price|property_search|outside_uae|general|conversation_response",
+    "confidence": 0.95,
+    "reasoning": "Brief explanation of classification"
+}}
 
-def is_property_query(query: str) -> bool:
-    query = query.lower().strip()
+CATEGORIES:
+- "greeting": Simple greetings (hi, hello, good morning, etc.)
+- "general_knowledge": Questions about property terms, definitions, explanations
+- "best_property": Queries asking for "best", "top", "premium", "featured" properties
+- "average_price": Queries asking for average/typical/mean prices or costs
+- "property_search": Queries looking for specific properties to lease/rent
+- "outside_uae": Queries about properties outside UAE (non-UAE locations)
+- "general": General property-related queries that don't fit other categories
+- "conversation_response": Responses to conversation flow (1, 2, yes, no, etc.)
 
-    # If user asks "what is ..." → it's a definition, not a search
-    if query.startswith("what is") or query.startswith("define "):
-        return False
+RULES:
+- Use high confidence (0.8+) for clear matches
+- Use lower confidence (0.6-0.8) for ambiguous cases
+- Consider context and intent, not just keywords
+- For conversation responses, check for simple responses like "1", "2", "yes", "no"
 
-    # Keywords that indicate the user is looking for listings
-    search_keywords = [
-        "show", "find", "rent", "buy", "lease", 
-        "apartment", "villa", "flat", "studio", 
-        "house", "bedroom", "property in", "listings",
-        "best", "average", "price", "available"
-    ]
+Output JSON:"""
 
-    return any(word in query for word in search_keywords)
-
-def is_outside_uae_query(query: str) -> bool:
-    """Check if the query is about properties outside UAE"""
-    query = query.lower().strip()
-    non_uae_locations = [
-        "london", "new york", "paris", "tokyo", "singapore", 
-        "mumbai", "delhi", "bangalore", "chennai", "kolkata",
-        "usa", "uk", "canada", "australia", "germany", "france",
-        "italy", "spain", "netherlands", "switzerland"
-    ]
-    return any(location in query for location in non_uae_locations)
-
-def extract_user_preferences_from_conversation(messages: List[Dict[str, str]]) -> Dict[str, Any]:
-    """Extract user preferences from conversation history with enhanced location tracking"""
-    preferences = {}
-    import re
-    for message in messages:
-        if message["role"] == "user":
-            content = message["content"].lower()
+        try:
+            response = self.llm_client.generate(prompt).strip()
             
-            # Enhanced location extraction with more emirates and communities
-            uae_emirates = {
-                "dubai": "dubai", "abu dhabi": "abu dhabi", "sharjah": "sharjah", 
-                "ajman": "ajman", "fujairah": "fujairah", "ras al khaimah": "ras al khaimah",
-                "umm al quwain": "umm al quwain"
-            }
+            # Extract JSON from response
+            json_match = re.search(r'\{.*\}', response, re.DOTALL)
+            if json_match:
+                result = json.loads(json_match.group(0))
+                return result
+        except Exception:
+            pass
+        
+        # Fallback to simple keyword matching if LLM fails
+        return self._fallback_classification(query)
+    
+    def _fallback_classification(self, query: str) -> Dict[str, Any]:
+        """Fallback classification using simple patterns"""
+        query_lower = query.lower().strip()
+        
+        # Simple fallback patterns
+        if any(word in query_lower for word in ["hi", "hello", "hey", "good morning", "good afternoon"]):
+            return {"category": "greeting", "confidence": 0.7, "reasoning": "Contains greeting words"}
+        elif any(word in query_lower for word in ["what is", "define", "explain", "meaning of"]):
+            return {"category": "general_knowledge", "confidence": 0.7, "reasoning": "Asking for definition/explanation"}
+        elif any(word in query_lower for word in ["best", "top", "premium", "featured"]):
+            return {"category": "best_property", "confidence": 0.7, "reasoning": "Asking for best/top properties"}
+        elif any(word in query_lower for word in ["average", "typical", "mean"]) and any(word in query_lower for word in ["price", "rent", "cost"]):
+            return {"category": "average_price", "confidence": 0.7, "reasoning": "Asking for average pricing"}
+        elif query_lower in ["1", "2", "yes", "no", "option 1", "option 2"]:
+            return {"category": "conversation_response", "confidence": 0.9, "reasoning": "Simple response to conversation flow"}
+        else:
+            return {"category": "property_search", "confidence": 0.5, "reasoning": "Default to property search"}
+
+
+class DynamicPreferenceExtractor:
+    """Dynamic LLM-based preference extraction"""
+    
+    def __init__(self, llm_client):
+        self.llm_client = llm_client
+    
+    def extract_preferences_from_conversation(self, messages: List[Dict[str, str]]) -> Dict[str, Any]:
+        """Extract preferences using LLM for dynamic, scalable extraction"""
+        if not messages:
+            return {}
+        
+        # Get recent user messages for context
+        user_messages = [msg["content"] for msg in messages if msg["role"] == "user"][-5:]  # Last 5 messages
+        if not user_messages:
+            return {}
+        
+        conversation_text = " ".join(user_messages)
+        
+        # Use LLM for intelligent preference extraction
+        llm_preferences = self._extract_with_llm(conversation_text)
+        if llm_preferences:
+            return llm_preferences
+        
+        # Fallback to regex-based extraction for critical fields
+        return self._fallback_regex_extraction(messages)
+    
+    def _extract_with_llm(self, conversation_text: str) -> Dict[str, Any]:
+        """Extract preferences using LLM"""
+        prompt = f"""Extract user preferences from this conversation about UAE property leasing.
+Return ONLY a JSON object with the extracted preferences. If nothing found, return {{}}.
+
+CONVERSATION: {conversation_text}
+
+AVAILABLE PROPERTY FIELDS (use these exact field names):
+- emirate, city, community, subcommunity
+- rent_charge (use {{"lte": amount}} for "under/below/max/up to" or {{"gte": amount}} for "above/over/at least")
+- number_of_bedrooms, number_of_bathrooms, property_size, year_built
+- property_type_id (apartment, villa, studio, townhouse, duplex, penthouse, office)
+- furnishing_status (furnished, semi-furnished, unfurnished)
+- lease_duration, payment_terms, sublease_allowed
+- available_from, lease_start_date, lease_end_date
+- swimming_pool, gym_fitness_center, parking, balcony_terrace, beach_access, elevators
+- security_available, concierge_available, pet_friendly, central_ac_heating, smart_home_features
+- bnb_verification_status, premiumBoostingStatus, carouselBoostingStatus
+
+EXTRACTION RULES:
+1. LOCATION: Extract emirate, city, community, subcommunity from any UAE location mentioned
+2. BUDGET: Extract rent_charge with proper range format
+3. PROPERTY SPECS: Extract bedrooms, bathrooms, size, year built
+4. PROPERTY TYPE: Map to standard types
+5. FURNISHING: Extract furnishing status
+6. AMENITIES: Extract boolean amenities (true/false)
+7. LEASE TERMS: Extract lease duration and terms
+8. DATES: Extract availability and lease dates
+9. VERIFICATION: Extract verification and boosting status
+
+IMPORTANT:
+- Convert all amounts to numbers (e.g., "100k" = 100000, "1.5M" = 1500000)
+- Use lowercase for text fields
+- Only include explicitly mentioned preferences
+- Be conservative - don't assume preferences not clearly stated
+- Use proper JSON format with correct data types
+
+Output JSON:"""
+
+        try:
+            response = self.llm_client.generate(prompt).strip()
             
-            # Check for emirate mentions
-            for location_key, emirate_value in uae_emirates.items():
-                if location_key in content:
-                    preferences["emirate"] = emirate_value
-                    break
-            
-            # Extract specific communities (more comprehensive)
-            communities = [
-                "dubai marina", "downtown dubai", "jumeirah", "business bay", "jlt", 
-                "jvc", "jbr", "palm jumeirah", "emirates hills", "arabian ranches",
-                "al reem island", "corniche", "al raha beach", "al nuaimia", "al zorah"
-            ]
-            
-            for community in communities:
-                if community in content:
-                    preferences["community"] = community
-                    break
+            # Try to extract JSON from response
+            json_match = re.search(r'\{.*\}', response, re.DOTALL)
+            if json_match:
+                result = json.loads(json_match.group(0))
+                # Validate and clean the result
+                return self._validate_preferences(result)
+        except Exception as e:
+            self.llm_client._logger.warning(f"LLM preference extraction failed: {e}")
+        
+        return {}
+    
+    def _validate_preferences(self, preferences: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate and clean extracted preferences"""
+        validated = {}
+        
+        for key, value in preferences.items():
+            # Validate field names and values
+            if key in ["emirate", "city", "community", "subcommunity"] and isinstance(value, str):
+                validated[key] = value.lower().strip()
+            elif key == "rent_charge" and isinstance(value, dict):
+                # Validate budget format
+                if ("lte" in value or "gte" in value) and isinstance(value.get("lte", value.get("gte")), (int, float)):
+                    validated[key] = value
+            elif key in ["number_of_bedrooms", "number_of_bathrooms", "property_size", "year_built"] and isinstance(value, (int, float)):
+                validated[key] = int(value)
+            elif key == "property_type_id" and value in ["apartment", "villa", "studio", "townhouse", "duplex", "penthouse", "office"]:
+                validated[key] = value
+            elif key == "furnishing_status" and value in ["furnished", "semi-furnished", "unfurnished"]:
+                validated[key] = value
+            elif key in ["swimming_pool", "gym_fitness_center", "parking", "balcony_terrace", "beach_access", "elevators", 
+                        "security_available", "concierge_available", "pet_friendly", "central_ac_heating", "smart_home_features"]:
+                validated[key] = bool(value)
+            elif key in ["available_from", "lease_start_date", "lease_end_date"] and isinstance(value, str):
+                validated[key] = value
+            elif key in ["bnb_verification_status", "premiumBoostingStatus", "carouselBoostingStatus"] and isinstance(value, str):
+                validated[key] = value
+        
+        return validated
+    
+    def _fallback_regex_extraction(self, messages: List[Dict[str, str]]) -> Dict[str, Any]:
+        """Fallback regex-based extraction for critical fields"""
+        preferences = {}
+        
+        for message in messages:
+            if message["role"] == "user":
+                content = message["content"].lower()
             
             # Extract bedroom preferences
             bed_match = re.search(r"(\d+)\s*bed(room)?s?", content)
@@ -236,15 +458,10 @@ def extract_user_preferences_from_conversation(messages: List[Dict[str, str]]) -
             if bath_match:
                 preferences["number_of_bathrooms"] = int(bath_match.group(1))
             
-            # Enhanced budget extraction with more patterns
+                # Extract budget preferences
             budget_patterns = [
-                r"under\s*(\d+)(?:k|000)?",  # "under 100k"
-                r"below\s*(\d+)(?:k|000)?",  # "below 100k"
-                r"less\s*than\s*(\d+)(?:k|000)?",  # "less than 100k"
-                r"max\s*(\d+)(?:k|000)?",  # "max 100k"
-                r"up\s*to\s*(\d+)(?:k|000)?",  # "up to 100k"
-                r"aed\s*(\d+)(?:k|000)?",  # "aed 100k"
-                r"(\d+)(?:k|000)?\s*aed",  # "100k aed"
+                    r"under\s*(\d+)(?:k|000)?", r"below\s*(\d+)(?:k|000)?", r"max\s*(\d+)(?:k|000)?", 
+                    r"up\s*to\s*(\d+)(?:k|000)?", r"aed\s*(\d+)(?:k|000)?"
             ]
             
             for pattern in budget_patterns:
@@ -256,110 +473,172 @@ def extract_user_preferences_from_conversation(messages: List[Dict[str, str]]) -
                     preferences["rent_charge"] = {"lte": budget}
                     break
             
-            # Extract property type preferences
-            property_types = {
-                "apartment": "apartment", "flat": "apartment", "condo": "apartment",
-                "villa": "villa", "house": "villa", "home": "villa",
-                "studio": "studio", "townhouse": "townhouse", "duplex": "duplex",
-                "penthouse": "penthouse", "office": "office"
-            }
-            
-            for type_key, type_value in property_types.items():
-                if type_key in content:
-                    preferences["property_type_id"] = type_value
-                    break
-            
-            # Extract furnishing preferences
-            if "furnished" in content:
-                preferences["furnishing_status"] = "furnished"
-            elif "unfurnished" in content:
-                preferences["furnishing_status"] = "unfurnished"
-            elif "semi-furnished" in content:
-                preferences["furnishing_status"] = "semi-furnished"
-            
-            # Extract amenity preferences
-            amenities = {
-                "pool": "swimming_pool", "gym": "gym_fitness_center", "parking": "parking",
-                "balcony": "balcony_terrace", "beach": "beach_access", "elevator": "elevators",
-                "security": "security_available", "concierge": "concierge_available",
-                "pet": "pet_friendly", "ac": "central_ac_heating", "smart": "smart_home_features"
-            }
-            
-            for amenity_key, amenity_field in amenities.items():
-                if amenity_key in content:
-                    preferences[amenity_field] = True
-                    break
-    return preferences
+        return preferences
 
-def extract_preferences_with_llm(conversation_text: str, llm_client) -> Dict[str, Any]:
-    """
-    Use LLM to extract preferences dynamically from conversation text.
-    This is the scalable approach that adapts to any property field without hardcoding.
-    """
-    prompt = f"""Extract user preferences from this conversation about UAE property leasing.
-Return ONLY a JSON object with the extracted preferences. If nothing found, return {{}}.
-
-CONVERSATION: {conversation_text}
-
-EXTRACTION RULES:
-1. LOCATION: Extract emirate, city, community, subcommunity from any UAE location mentioned
-2. BUDGET: Extract rent_charge as {{"lte": amount}} for "under/below/less than/max/up to" or {{"gte": amount}} for "above/over/at least"
-3. PROPERTY SPECS: Extract number_of_bedrooms, number_of_bathrooms, property_size, year_built
-4. PROPERTY TYPE: Map to standard types (apartment, villa, studio, townhouse, duplex, penthouse, office)
-5. FURNISHING: Extract furnishing_status (furnished, semi-furnished, unfurnished)
-6. AMENITIES: Extract boolean amenities (pool, gym, parking, balcony, beach, elevator, security, concierge, pet_friendly, central_ac_heating, smart_home_features, etc.)
-7. LEASE TERMS: Extract lease_duration, payment_terms, sublease_allowed
-8. DATES: Extract available_from, lease_start_date, lease_end_date
-9. VERIFICATION: Extract bnb_verification_status, premiumBoostingStatus, carouselBoostingStatus
-
-IMPORTANT:
-- Convert all amounts to numbers (e.g., "100k" = 100000)
-- Use lowercase for text fields
-- Only include explicitly mentioned preferences
-- Be conservative - don't assume preferences not clearly stated
-
-Output JSON:"""
-
-    try:
-        response = llm_client.generate(prompt).strip()
-        
-        # Parse JSON response
-        import json
-        import re
-        
-        # Try to extract JSON from response
-        json_match = re.search(r'\{.*\}', response, re.DOTALL)
-        if json_match:
-            return json.loads(json_match.group(0))
-        
-        return {}
-        
-    except Exception:
-        return {}
-
-def extract_user_preferences_hybrid(messages: List[Dict[str, str]], llm_client=None) -> Dict[str, Any]:
-    """
-    Hybrid approach: Use LLM for intelligent extraction with regex fallback.
-    This provides the best of both worlds - scalability and reliability.
-    """
-    if not messages:
-        return {}
+class DynamicAlternativesGenerator:
+    """Dynamic LLM-based alternatives generation"""
     
-    # Get recent user messages
-    user_messages = [msg["content"] for msg in messages if msg["role"] == "user"][-3:]
-    if not user_messages:
-        return {}
+    def __init__(self, llm_client):
+        self.llm_client = llm_client
     
-    conversation_text = " ".join(user_messages)
+    def generate_verified_alternatives(self, preferences: Dict[str, Any], retriever) -> List[Dict[str, Any]]:
+        """Generate alternatives using LLM reasoning and verify with database"""
+        if not preferences:
+            return []
+        
+        # Use LLM to generate alternative suggestions
+        alternatives = self._generate_alternatives_with_llm(preferences)
+        
+        # Verify alternatives exist in database
+        verified_alternatives = []
+        for alt in alternatives:
+            if self._verify_alternative_exists(alt, retriever):
+                verified_alternatives.append(alt)
+        
+        return verified_alternatives[:3]  # Return top 3 verified alternatives
     
-    # Try LLM extraction first if client is available
-    if llm_client:
-        llm_preferences = extract_preferences_with_llm(conversation_text, llm_client)
-        if llm_preferences:
-            return llm_preferences
+    def _generate_alternatives_with_llm(self, preferences: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Generate alternatives using LLM reasoning"""
+        prompt = f"""Generate alternative property search options for a user with these preferences:
+
+CURRENT PREFERENCES: {preferences}
+
+Generate 3-5 alternative search options that could help the user find similar properties.
+Return ONLY a JSON array of alternatives.
+
+Each alternative should have this format:
+{{
+    "type": "location|budget|property_type|amenities|furnishing",
+    "suggestion": "Human-readable suggestion",
+    "filters": {{"field": "value"}},
+    "reasoning": "Why this alternative might work"
+}}
+
+ALTERNATIVE TYPES:
+- "location": Nearby areas, different communities, or adjacent emirates
+- "budget": Flexible budget options (+/- 20%)
+- "property_type": Similar property types (apartment→studio, villa→townhouse)
+- "amenities": Relaxed amenity requirements
+- "furnishing": Different furnishing options
+
+RULES:
+- Only suggest alternatives that make sense for UAE properties
+- For location: suggest nearby communities or adjacent emirates
+- For budget: suggest ±20% flexibility
+- For property type: suggest similar but different types
+- Be practical and realistic
+- Focus on what would actually help find more properties
+
+Output JSON array:"""
+
+        try:
+            response = self.llm_client.generate(prompt).strip()
+            
+            # Extract JSON array from response
+            json_match = re.search(r'\[.*\]', response, re.DOTALL)
+            if json_match:
+                alternatives = json.loads(json_match.group(0))
+                return alternatives if isinstance(alternatives, list) else []
+        except Exception as e:
+            self.llm_client._logger.warning(f"LLM alternatives generation failed: {e}")
+        
+        return []
     
-    # Fallback to regex-based extraction for critical fields
-    return extract_user_preferences_from_conversation(messages)
+    def _verify_alternative_exists(self, alternative: Dict[str, Any], retriever) -> bool:
+        """Verify that an alternative actually has properties in the database"""
+        try:
+            filters = alternative.get("filters", {})
+            suggestion = alternative.get("suggestion", "")
+            
+            # Test if properties exist for this alternative
+            test_chunks = retriever.retrieve(suggestion, filters=filters, top_k=1)
+            
+            if test_chunks and len(test_chunks) > 0:
+                # Get count for the alternative
+                count_chunks = retriever.retrieve(suggestion, filters=filters, top_k=10)
+                alternative["count"] = f"{len(count_chunks)}+"
+                return True
+            
+        except Exception as e:
+            self.llm_client._logger.debug(f"Failed to verify alternative: {e}")
+        
+        return False
+
+class DynamicResponseGenerator:
+    """Dynamic LLM-based response generation"""
+    
+    def __init__(self, llm_client):
+        self.llm_client = llm_client
+    
+    def generate_greeting_response(self, user_input: str, conversation_history: List[Dict[str, str]]) -> str:
+        """Generate dynamic greeting responses"""
+        prompt = f"""Generate a warm, friendly greeting response for a UAE property leasing assistant.
+
+USER GREETING: "{user_input}"
+CONVERSATION HISTORY: {len(conversation_history)} messages
+
+Generate a natural, engaging greeting response that:
+- Welcomes the user warmly
+- Introduces yourself as LeaseOasis, a UAE property assistant
+- Asks an engaging follow-up question about their property search
+- Sounds human and conversational
+- Keeps it brief but inviting
+
+EXAMPLES OF GOOD FOLLOW-UP QUESTIONS:
+- "Which UAE city are you interested in?"
+- "What brings you here today?"
+- "Are you looking for your first property or moving to a new area?"
+- "What type of property are you considering?"
+
+Return ONLY the greeting response, no additional text."""
+
+        try:
+            response = self.llm_client.generate(prompt).strip()
+            return response if response else self._fallback_greeting()
+        except Exception:
+            return self._fallback_greeting()
+    
+    def _fallback_greeting(self) -> str:
+        """Fallback greeting if LLM fails"""
+        greetings = [
+            "Hello! I'm LeaseOasis, your friendly UAE property assistant. I'm here to help you find the perfect property to lease in the UAE. Which city are you interested in — Dubai, Abu Dhabi, or somewhere else?",
+            "Hi there! Welcome to LeaseOasis! I specialize in helping people find great properties to lease in the UAE. What brings you here today?",
+            "Hey! Great to meet you! I'm LeaseOasis, your UAE property leasing assistant. What type of property are you looking for?"
+        ]
+        return greetings[0]  # Return first greeting as fallback
+    
+    def generate_general_knowledge_response(self, user_input: str, conversation_history: List[Dict[str, str]]) -> str:
+        """Generate dynamic general knowledge responses"""
+        prompt = f"""Generate a helpful response about property knowledge for a UAE property leasing assistant.
+
+USER QUESTION: "{user_input}"
+
+Generate a response that:
+- Answers the question clearly and helpfully
+- Uses simple, easy-to-understand language
+- Relates to UAE property context when relevant
+- Guides the user back to property search
+- Keeps it concise but informative
+
+If the question is about property terms, provide a clear definition.
+If the question is unrelated to properties, politely redirect to property-related topics.
+
+Return ONLY the response, no additional text."""
+
+        try:
+            response = self.llm_client.generate(prompt).strip()
+            return response if response else self._fallback_general_response()
+        except Exception:
+            return self._fallback_general_response()
+    
+    def _fallback_general_response(self) -> str:
+        """Fallback response if LLM fails"""
+        return (
+            "I'd be happy to explain that! However, I'm specifically designed to help you find properties to lease in the UAE. "
+            "If you have questions about property types, leasing terms, or UAE-specific property information, I can help with that. "
+            "Would you like to search for properties instead?"
+        )
+
 
 class LLMClient(BaseLLM):
     def __init__(self, config: LLMConfig, api_key: Optional[str]) -> None:
@@ -371,121 +650,43 @@ class LLMClient(BaseLLM):
             raise ValueError(f"Unsupported LLM provider: {config.provider}")
         self._provider_client = provider_cls(config, api_key)
         self.conversation = Conversation()
+        
+        # Initialize dynamic components
+        self.query_classifier = DynamicQueryClassifier(self._provider_client)
+        self.preference_extractor = DynamicPreferenceExtractor(self._provider_client)
 
-        # Updated system instructions
-        self.conversation.add_message(
-            "system",
-            f"{SYSTEM_PROMPT_BASE}.\n"
-            "\n"
-            "Core Behavior:\n"
-            "- Always sound polite, respectful, and human-like.\n"
-            "- Keep track of conversation history for smoother follow-ups.\n"
-            "- Only provide property details when the user has given enough details AND retrieved context matches.\n"
-            "- Never fabricate or guess property details.\n"
-            "- Only support UAE properties - politely redirect non-UAE queries.\n"
-            "\n"
-            "Greetings:\n"
-            "- If the user greets you (hi, hello, hey), greet them back warmly and ask one friendly follow-up question "
-            "(e.g., 'Which UAE city are you interested in — Dubai, Abu Dhabi, or somewhere else?').\n"
-            "- Keep sources empty for greetings - no property details should be shown.\n"
-            "\n"
-            "Non-property Queries:\n"
-            "- If the user asks about something unrelated to properties (e.g., sports, politics, weather), politely explain "
-            "that you can only assist with UAE property-related queries, and guide them back with a property-related question.\n"
-            "- Keep sources empty for non-property queries.\n"
-            "\n"
-            "Outside UAE:\n"
-            "- If the user asks about properties outside UAE, politely explain that you only support UAE properties, and ask "
-            "a follow-up question about UAE instead.\n"
-            "- Keep sources empty for outside UAE queries.\n"
-            "\n"
-            "General Knowledge Queries:\n"
-            "- If the user asks general questions like 'What is property?', 'What is an apartment?', 'What is holiday home ready?', "
-            "provide a clear and helpful explanation using web search if needed.\n"
-            "- Do NOT show property listings or data for these questions.\n"
-            "- Keep sources empty for general knowledge queries.\n"
-            "\n"
-            "Best Property Queries:\n"
-            "- When user asks for 'best properties', prioritize in this order:\n"
-            "  1. Properties with premiumBoostingStatus: 'Active', carouselBoostingStatus: 'Active', and bnb_verification_status: 'verified'\n"
-            "  2. Properties with bnb_verification_status: 'verified'\n"
-            "  3. Properties with carouselBoostingStatus: 'Active'\n"
-            "  4. Properties with premiumBoostingStatus: 'Active'\n"
-            "- Show property details with sources for best property queries.\n"
-            "\n"
-            "Average Price Queries:\n"
-            "- When user asks for 'average price' or 'average rent', calculate the average rent_charge from the retrieved context.\n"
-            "- Provide the average value but do NOT show individual property details in sources.\n"
-            "- Keep sources empty for average price queries.\n"
-            "\n"
-            "Property Search Queries:\n"
-            "- If the user asks to see properties in a UAE location, do NOT show listings immediately.\n"
-            "- Instead, ask one follow-up question at a time until you have enough details:\n"
-            "  • Budget or price range\n"
-            "  • Property type (apartment, villa, studio, etc.)\n"
-            "  • Number of bedrooms/bathrooms\n"
-            "  • Location (city, neighborhood)\n"
-            "  • Size (sqft or sqm)\n"
-            "- Only after gathering sufficient details, you may use retrieved property data to answer.\n"
-            "- Show property details with sources for property search queries.\n"
-            "\n"
-            "No Matches Found:\n"
-            "- When no properties match user criteria, offer two options:\n"
-            "  1. Try alternate searches (nearby locations, different budget, alternative property types)\n"
-            "  2. Gather user requirements to send to admin team\n"
-            "- Check if alternative locations exist in context before suggesting them.\n"
-            "\n"
-            "Identity:\n"
-            "- If the user asks 'Who are you?', respond: 'I am LeaseOasis, your friendly UAE property assistant, here to help "
-            "you find and understand leasing options.'\n"
-            "- Keep sources empty for identity queries.\n"
-            "\n"
-            "Sources:\n"
-            "- Only show sources (table and id) when giving factual property details from retrieved chunks.\n"
-            "- Do NOT show sources for: greetings, general knowledge, average price calculations, identity queries, or outside UAE queries.\n"
-            "- Always show sources for: property search results, best property queries, specific property details.\n"
-            "\n"
-            "Interactive Conversation:\n"
-            "- Remember user preferences from conversation history.\n"
-            "- Build on previous exchanges naturally.\n"
-            "- Ask follow-up questions based on what user has already shared.\n"
-            "- Make the conversation feel like talking to a human property expert.\n"
-            "\n"
-            "Tone & Experience:\n"
-            "- Use simple, clear, and engaging language.\n"
-            "- Ask only ONE clarifying question at a time.\n"
-            "- Always acknowledge vague queries politely and guide the user naturally.\n"
-            "- Be conversational and helpful, not robotic.\n"
-        )
+        # Set consolidated system instructions
+        self.conversation.add_message("system", COMPLETE_SYSTEM_PROMPT)
 
     def chat(self, user_input: str, retrieved_chunks: Optional[List[RetrievedChunk]] = None) -> str:
-        """Process user query with greetings, clarifications, or polite handling of out-of-scope queries."""
+        """Process user query using dynamic classification and handling."""
         user_input = user_input.strip()
 
-        # Check for conversation flow responses (1, 2, yes, no)
-        if self._is_conversation_response(user_input):
-            return self._handle_conversation_response(user_input, retrieved_chunks)
+        # Use dynamic query classification
+        classification = self.query_classifier.classify_query(user_input)
+        category = classification.get("category", "general")
+        confidence = classification.get("confidence", 0.5)
+        
+        self._logger.debug(f"Query classified as: {category} (confidence: {confidence})")
 
-        # Handle different types of queries
-        if is_greeting(user_input):
+        # Handle based on dynamic classification
+        if category == "conversation_response":
+            return self._handle_conversation_response(user_input, retrieved_chunks)
+        elif category == "greeting":
             return self._handle_greeting(user_input)
-        elif is_outside_uae_query(user_input):
+        elif category == "outside_uae":
             return self._handle_outside_uae_query(user_input)
-        elif is_general_knowledge_query(user_input):
+        elif category == "general_knowledge":
             return self._handle_general_knowledge_query(user_input)
-        elif is_best_property_query(user_input):
+        elif category == "best_property":
             return self._handle_best_property_query(user_input, retrieved_chunks)
-        elif is_average_price_query(user_input):
+        elif category == "average_price":
             return self._handle_average_price_query(user_input, retrieved_chunks)
-        elif is_property_query(user_input):
+        elif category == "property_search":
             return self._handle_property_query(user_input, retrieved_chunks)
         else:
             return self._handle_general_query(user_input)
 
-    def _is_conversation_response(self, user_input: str) -> bool:
-        """Check if user input is a conversation flow response"""
-        user_input = user_input.lower().strip()
-        return user_input in ["1", "2", "yes", "no", "option 1", "option 2", "first", "second", "save", "alternatives"]
 
     def _handle_conversation_response(self, user_input: str, retrieved_chunks: Optional[List[RetrievedChunk]] = None):
         """Handle user responses to conversation flow (1, 2, yes, no)"""
@@ -558,14 +759,10 @@ class LLMClient(BaseLLM):
         )
 
     def _handle_greeting(self, user_input: str) -> str:
-        """Handle greeting messages"""
-        greetings = [
-            "Hello! I'm LeaseOasis, your friendly UAE property assistant. I'm here to help you find the perfect property to lease in the UAE. Which city are you interested in — Dubai, Abu Dhabi, or somewhere else?",
-            "Hi there! Welcome to LeaseOasis! I specialize in helping people find great properties to lease in the UAE. What brings you here today? Are you looking for an apartment, villa, or something else?",
-            "Hey! Great to meet you! I'm LeaseOasis, your UAE property leasing assistant. I can help you find properties in Dubai, Abu Dhabi, Sharjah, and other UAE cities. What type of property are you looking for?"
-        ]
-        import random
-        response = random.choice(greetings)
+        """Handle greeting messages using dynamic response generation"""
+        # Use dynamic response generator for greetings
+        response_generator = DynamicResponseGenerator(self._provider_client)
+        response = response_generator.generate_greeting_response(user_input, self.conversation.get_messages())
         self._add_conversation_messages(user_input, response)
         return response
 
@@ -579,15 +776,12 @@ class LLMClient(BaseLLM):
         return response
 
     def _handle_general_knowledge_query(self, user_input: str) -> str:
-        """Handle general property knowledge queries"""
-        # Use web search for general knowledge
+        """Handle general property knowledge queries using dynamic response generation"""
         try:
-            # For now, provide a helpful response without web search
-            response = (
-                "I'd be happy to explain that! However, I'm specifically designed to help you find properties to lease in the UAE. "
-                "If you have questions about property types, leasing terms, or UAE-specific property information, I can help with that. "
-                "Would you like to search for properties instead, or do you have a specific UAE property question?"
-            )
+            # Use dynamic response generator for general knowledge
+            response_generator = DynamicResponseGenerator(self._provider_client)
+            response = response_generator.generate_general_knowledge_response(user_input, self.conversation.get_messages())
+                
         except Exception as e:
             self._logger.warning(f"Error handling general knowledge query: {e}")
             response = "I can help you with UAE property-related questions. Would you like to search for properties instead?"
@@ -598,8 +792,7 @@ class LLMClient(BaseLLM):
     def _handle_best_property_query(self, user_input: str, retrieved_chunks: Optional[List[RetrievedChunk]] = None) -> str:
         """Handle 'best property' queries with proper prioritization"""
         if retrieved_chunks:
-            # Build context-aware prompt for best properties
-            context_prompt = self._build_best_property_prompt(user_input, retrieved_chunks)
+            context_prompt = self._build_context_and_prompt(user_input, retrieved_chunks)
             response = self._safe_generate([{"role": "user", "content": context_prompt}])
         else:
             # No results found - offer alternatives
@@ -612,8 +805,7 @@ class LLMClient(BaseLLM):
     def _handle_average_price_query(self, user_input: str, retrieved_chunks: Optional[List[RetrievedChunk]] = None) -> str:
         """Handle 'average price' queries"""
         if retrieved_chunks:
-            # Calculate average price from context
-            context_prompt = self._build_average_price_prompt(user_input, retrieved_chunks)
+            context_prompt = self._build_context_and_prompt(user_input, retrieved_chunks)
             response = self._safe_generate([{"role": "user", "content": context_prompt}])
         else:
             response = (
@@ -625,14 +817,13 @@ class LLMClient(BaseLLM):
         return response
 
     def _handle_property_query(self, user_input: str, retrieved_chunks: Optional[List[RetrievedChunk]] = None) -> str:
-        """Handle property search queries"""
-        # Extract user preferences from conversation
-        preferences = extract_user_preferences_from_conversation(self.conversation.get_messages())
+        """Handle property search queries using dynamic preference extraction"""
+        # Extract user preferences using dynamic LLM-based extraction
+        preferences = self.preference_extractor.extract_preferences_from_conversation(self.conversation.get_messages())
         self.conversation.update_preferences(preferences)
 
         if retrieved_chunks:
-            # Build context-aware prompt
-            context_prompt = self._build_context_prompt(user_input, retrieved_chunks)
+            context_prompt = self._build_context_and_prompt(user_input, retrieved_chunks)
             response = self._safe_generate([{"role": "user", "content": context_prompt}])
         else:
             # No results found - offer alternatives or gather requirements
@@ -660,67 +851,7 @@ class LLMClient(BaseLLM):
             context_lines.append("")
         return "\n".join(context_lines)
 
-    def _build_prompt_template(self, instructions: str, user_input: str, context_block: str) -> str:
-        """Build a standardized prompt template to eliminate duplication"""
-        return f"Instructions:\n{instructions}\n\nUser question:\n{user_input}\n\nProperty Context:\n{context_block}\n\nResponse:"
 
-    def _build_context_prompt(self, user_input: str, retrieved_chunks: List[RetrievedChunk]) -> str:
-        """Build a context-aware prompt for property queries with conversation memory (Step 8)"""
-        # Get conversation context for short-term memory
-        conversation_history = self._get_conversation_context()
-        user_preferences = self.conversation.get_preferences()
-        
-        # Enhanced instructions for Step 8 - Interactive conversation with memory
-        instructions = (
-            f"{SYSTEM_PROMPT_BASE} with memory.\n"
-            "\n"
-            "CORE BEHAVIOR (Step 8 Requirements):\n"
-            "- Sound like a human property expert, not a chatbot\n"
-            "- Use conversation memory to provide personalized responses\n"
-            "- Only answer about UAE properties - you have no data outside UAE\n"
-            "- Use ONLY the retrieved context for property details - never fabricate\n"
-            "- For greetings: respond warmly but keep sources empty\n"
-            "- For general property terms: explain briefly but keep sources empty\n"
-            "- For property queries: show detailed properties with sources\n"
-            "\n"
-            "CONVERSATION MEMORY:\n"
-            "- Remember user preferences from previous messages\n"
-            "- Reference earlier conversation points naturally\n"
-            "- Build on previous questions and answers\n"
-            "- Adapt responses based on user's journey\n"
-            "\n"
-            "INTERACTIVE CONVERSATION STYLE:\n"
-            "- Ask follow-up questions to understand needs better\n"
-            "- Guide users through property selection naturally\n"
-            "- Offer alternatives when exact matches aren't found\n"
-            "- Make suggestions based on conversation context\n"
-            "- Feel like talking to a knowledgeable property advisor\n"
-            "\n"
-            "SOURCES & CONTEXT:\n"
-            "- Always cite sources [Source X] for property details\n"
-            "- Show property cards with complete information\n"
-            "- Include location, price, amenities, and contact details\n"
-            "- For non-property responses, leave sources empty\n"
-        )
-
-        # Build conversation context section
-        memory_section = ""
-        if conversation_history:
-            memory_section = f"\n\nCONVERSATION MEMORY:\n{conversation_history}"
-        
-        preferences_section = ""
-        if user_preferences:
-            pref_items = []
-            for key, value in user_preferences.items():
-                if isinstance(value, dict) and "lte" in value:
-                    pref_items.append(f"{key}: up to {value['lte']}")
-                else:
-                    pref_items.append(f"{key}: {value}")
-            if pref_items:
-                preferences_section = f"\n\nUSER PREFERENCES: {', '.join(pref_items)}"
-
-        full_instructions = f"{instructions}{memory_section}{preferences_section}"
-        return self._build_context_and_prompt(user_input, retrieved_chunks, full_instructions)
 
     def _get_conversation_context(self) -> str:
         """Get recent conversation history for short-term memory"""
@@ -739,38 +870,7 @@ class LLMClient(BaseLLM):
             
         return " | ".join(context_parts)
 
-    def _build_best_property_prompt(self, user_input: str, retrieved_chunks: List[RetrievedChunk]) -> str:
-        """Build a context-aware prompt for best property queries"""
-        instructions = (
-            f"{SYSTEM_PROMPT_BASE}.\n"
-            "Best Property Query Instructions:\n"
-            "- Prioritize properties in this exact order:\n"
-            "  1. Properties with premiumBoostingStatus: 'Active', carouselBoostingStatus: 'Active', and bnb_verification_status: 'verified'\n"
-            "  2. Properties with bnb_verification_status: 'verified'\n"
-            "  3. Properties with carouselBoostingStatus: 'Active'\n"
-            "  4. Properties with premiumBoostingStatus: 'Active'\n"
-            "- Show the top 3-5 best properties with their details.\n"
-            "- Always show sources (table and id) for property details.\n"
-            "- Be conversational and explain why these are the 'best' properties.\n"
-            "- If no premium/verified properties exist, show the best available options.\n"
-        )
 
-        return self._build_context_and_prompt(user_input, retrieved_chunks, instructions)
-
-    def _build_average_price_prompt(self, user_input: str, retrieved_chunks: List[RetrievedChunk]) -> str:
-        """Build a context-aware prompt for average price queries"""
-        instructions = (
-            f"{SYSTEM_PROMPT_BASE}.\n"
-            "Average Price Query Instructions:\n"
-            "- Calculate the average rent_charge from the retrieved context.\n"
-            "- Provide the average value in AED.\n"
-            "- Do NOT show individual property details or sources.\n"
-            "- Be conversational and helpful.\n"
-            "- If you can't calculate an average, explain why and ask for clarification.\n"
-            "- Example format: 'The average rent for 2-bedroom apartments in Dubai Marina is AED 95,000/year based on the available data.'\n"
-        )
-
-        return self._build_context_and_prompt(user_input, retrieved_chunks, instructions)
 
     def _handle_no_results(self, user_input: str, preferences: Dict[str, Any]) -> str:
         """Handle cases where no properties are found - with context checking and requirement gathering"""
@@ -805,99 +905,13 @@ class LLMClient(BaseLLM):
 
 
     def _get_verified_alternatives(self, preferences: Dict[str, Any], retriever) -> List[Dict[str, Any]]:
-        """Check vector database for viable alternatives and return verified suggestions"""
-        verified_alternatives = []
-        
+        """Generate dynamic alternatives using LLM reasoning and database verification"""
         if not retriever:
-            return verified_alternatives
-            
-        try:
-            # Location alternatives - check nearby areas
-            if "emirate" in preferences:
-                current_emirate = preferences["emirate"]
-                nearby_locations = {
-                    "sharjah": ["dubai", "ajman"],
-                    "dubai": ["sharjah", "abu dhabi"], 
-                    "abu dhabi": ["dubai"],
-                    "ajman": ["sharjah", "dubai"],
-                    "fujairah": ["sharjah"],
-                    "ras al khaimah": ["dubai", "sharjah"]
-                }
-                
-                for nearby in nearby_locations.get(current_emirate, []):
-                    # Test query to check if properties exist
-                    test_filters = preferences.copy()
-                    test_filters["emirate"] = nearby
-                    
-                    try:
-                        # Quick retrieval test with small top_k
-                        test_chunks = retriever.retrieve(f"properties in {nearby}", filters=test_filters, top_k=1)
-                        if test_chunks and len(test_chunks) > 0:
-                            # Get approximate count with larger search
-                            count_chunks = retriever.retrieve(f"properties in {nearby}", filters=test_filters, top_k=10)
-                            verified_alternatives.append({
-                                "type": "location",
-                                "suggestion": f"Properties in {nearby.title()} (nearby emirate)",
-                                "filters": test_filters,
-                                "count": f"{len(count_chunks)}+"
-                            })
-                    except Exception as e:
-                        self._logger.debug(f"Failed to check alternative: {e}")
-                        continue
-            
-            # Budget alternatives - check flexible pricing
-            if "rent_charge" in preferences and isinstance(preferences["rent_charge"], dict):
-                if "lte" in preferences["rent_charge"]:
-                    current_budget = preferences["rent_charge"]["lte"]
-                    
-                    # Try +20% budget
-                    test_filters = preferences.copy()
-                    test_filters["rent_charge"] = {"lte": int(current_budget * 1.2)}
-                    
-                    try:
-                        test_chunks = retriever.retrieve("properties", filters=test_filters, top_k=5)
-                        if test_chunks and len(test_chunks) > 0:
-                            verified_alternatives.append({
-                                "type": "budget",
-                                "suggestion": f"Properties up to AED {int(current_budget * 1.2):,}/year (20% higher budget)",
-                                "filters": test_filters,
-                                "count": f"{len(test_chunks)}+"
-                            })
-                    except Exception:
-                        pass
-            
-            # Property type alternatives
-            if "property_type_id" in preferences:
-                current_type = preferences["property_type_id"]
-                type_alternatives = {
-                    "apartment": ["studio", "duplex"],
-                    "villa": ["townhouse", "duplex"],
-                    "studio": ["apartment"],
-                    "townhouse": ["villa", "duplex"]
-                }
-                
-                for alt_type in type_alternatives.get(current_type, []):
-                    test_filters = preferences.copy()
-                    test_filters["property_type_id"] = alt_type
-                    
-                    try:
-                        test_chunks = retriever.retrieve(f"{alt_type} properties", filters=test_filters, top_k=3)
-                        if test_chunks and len(test_chunks) > 0:
-                            verified_alternatives.append({
-                                "type": "property_type", 
-                                "suggestion": f"{alt_type.title()}s instead of {current_type}s",
-                                "filters": test_filters,
-                                "count": f"{len(test_chunks)}+"
-                            })
-                            break  # Only suggest one alternative type
-                    except Exception as e:
-                        self._logger.debug(f"Failed to check alternative: {e}")
-                        continue
-                        
-        except Exception as e:
-            self._logger.error(f"Error checking alternatives: {e}")
-            
-        return verified_alternatives[:3]  # Return top 3 verified alternatives
+            return []
+        
+        # Use dynamic alternatives generator
+        alternatives_generator = DynamicAlternativesGenerator(self._provider_client)
+        return alternatives_generator.generate_verified_alternatives(preferences, retriever)
 
     def _summarize_conversation_context(self) -> str:
         """Summarize conversation for requirement gathering"""
@@ -970,25 +984,41 @@ class LLMClient(BaseLLM):
         
         endpoint = self._config.requirement_gathering.endpoint or "http://localhost:5000/backend/api/v1/user/requirement"
         
+        # Enhanced requirements payload with conversation context
+        enhanced_requirements = {
+            "user_query": requirements.get("user_query", ""),
+            "preferences": requirements.get("preferences", {}),
+            "conversation_summary": requirements.get("conversation_summary", ""),
+            "session_id": requirements.get("session_id", ""),
+            "timestamp": requirements.get("timestamp", time.time()),
+            "conversation_history": self._get_conversation_summary_for_endpoint(),
+            "search_attempts": self._get_search_attempts_summary(),
+            "alternatives_suggested": self._get_alternatives_summary()
+        }
+        
         try:
+            self._logger.info(f"Sending requirements to endpoint: {endpoint}")
             response = requests.post(
                 endpoint,
-                json=requirements,
-                timeout=10,
+                json=enhanced_requirements,
+                timeout=15,
                 headers={"Content-Type": "application/json"}
             )
             
             if response.status_code == 200:
                 self.conversation.set_requirement_gathered(True)
+                self._logger.info("Requirements successfully sent to endpoint")
                 return (
                     "✅ Perfect! I've saved your requirements and sent them to our team.\n\n"
                     "Our property specialists will:\n"
                     "• Work with local agencies to find matching properties\n"
                     "• Add new listings that meet your criteria\n"
                     "• Notify you when suitable properties become available\n\n"
-                    "Thank you for helping us improve our platform! Is there anything else I can help you with today?"
+                    "This helps us understand what users are looking for and improve our platform. "
+                    "Is there anything else I can help you with today?"
                 )
             else:
+                self._logger.warning(f"Endpoint returned status {response.status_code}")
                 return (
                     "I've noted your requirements, but there was a technical issue saving them to our system. "
                     "Don't worry - I can still help you search for properties or try again later. "
@@ -1012,10 +1042,6 @@ class LLMClient(BaseLLM):
         self.conversation.add_message("user", user_input)
         self.conversation.add_message("assistant", response)
 
-    def _build_context_and_prompt(self, user_input: str, retrieved_chunks: List[RetrievedChunk], instructions: str) -> str:
-        """Helper method to build context and prompt template to eliminate duplication"""
-        context_block = self._build_context_from_chunks(retrieved_chunks)
-        return self._build_prompt_template(instructions, user_input, context_block)
 
     def _safe_generate(self, messages: List[Dict[str, str]], retries: int = 2, delay: int = 1) -> str:
         """Call provider safely with retry logic."""
@@ -1028,3 +1054,71 @@ class LLMClient(BaseLLM):
                     time.sleep(delay)
                 else:
                     return "I'm sorry, I couldn't process your request right now."
+
+    def _get_conversation_summary_for_endpoint(self) -> str:
+        """Get detailed conversation summary for endpoint"""
+        messages = self.conversation.get_messages()
+        if not messages:
+            return "No conversation history"
+        
+        # Get user messages for context
+        user_messages = [msg["content"] for msg in messages if msg["role"] == "user"]
+        assistant_messages = [msg["content"] for msg in messages if msg["role"] == "assistant"]
+        
+        summary_parts = []
+        summary_parts.append(f"User queries: {'; '.join(user_messages[-5:])}")  # Last 5 user messages
+        summary_parts.append(f"Assistant responses: {'; '.join(assistant_messages[-3:])}")  # Last 3 assistant responses
+        
+        return " | ".join(summary_parts)
+
+    def _get_search_attempts_summary(self) -> List[Dict[str, Any]]:
+        """Get summary of search attempts made during conversation"""
+        # Track search attempts in conversation metadata
+        search_attempts = []
+        messages = self.conversation.get_messages()
+        
+        for msg in messages:
+            if msg["role"] == "user" and any(keyword in msg["content"].lower() for keyword in ["find", "search", "show", "list", "get"]):
+                search_attempts.append({
+                    "query": msg["content"],
+                    "timestamp": time.time()
+                })
+        
+        return search_attempts[-5:]  # Last 5 search attempts
+
+    def _get_alternatives_summary(self) -> List[Dict[str, Any]]:
+        """Get summary of alternatives suggested during conversation"""
+        # This would track alternatives suggested - for now return empty list
+        # In a full implementation, you'd track this in conversation metadata
+        return []
+
+    def _build_context_and_prompt(self, user_input: str, retrieved_chunks: List[RetrievedChunk]) -> str:
+        """Build context prompt with conversation memory and user preferences"""
+        # Get conversation context for short-term memory
+        conversation_history = self._get_conversation_context()
+        user_preferences = self.conversation.get_preferences()
+        
+        # Build context block from retrieved chunks
+        context_block = self._build_context_from_chunks(retrieved_chunks)
+        
+        # Build conversation context section
+        memory_section = ""
+        if conversation_history:
+            memory_section = f"\n\nCONVERSATION HISTORY:\n{conversation_history}"
+        
+        preferences_section = ""
+        if user_preferences:
+            pref_items = []
+            for key, value in user_preferences.items():
+                if isinstance(value, dict) and "lte" in value:
+                    pref_items.append(f"{key}: up to {value['lte']}")
+                elif isinstance(value, dict) and "gte" in value:
+                    pref_items.append(f"{key}: at least {value['gte']}")
+                else:
+                    pref_items.append(f"{key}: {value}")
+            if pref_items:
+                preferences_section = f"\n\nUSER PREFERENCES: {', '.join(pref_items)}"
+
+        # Build complete prompt with context
+        prompt = f"User question:\n{user_input}{memory_section}{preferences_section}\n\nProperty Context:\n{context_block}\n\nResponse:"
+        return prompt

@@ -1,30 +1,8 @@
 from __future__ import annotations
 from typing import Dict, Tuple, Any, List
-import re
 import json
 from .llm import LLMClient
 from .config import get_settings
-
-def extract_basic_filters(query: str) -> Dict[str, Any]:
-    """
-    Extract only the most basic filters using regex for performance.
-    The comprehensive LLM extraction will handle everything else.
-    """
-    filters: Dict[str, Any] = {}
-    q_lower = query.lower()
-
-    # Only keep the most reliable regex patterns
-    # Bedrooms (very reliable pattern)
-    bed_match = re.search(r"(\d+)\s*bed(room)?s?", q_lower)
-    if bed_match:
-        filters["number_of_bedrooms"] = int(bed_match.group(1))
-
-    # Bathrooms (very reliable pattern)
-    bath_match = re.search(r"(\d+)\s*bath(room)?s?", q_lower)
-    if bath_match:
-        filters["number_of_bathrooms"] = int(bed_match.group(1))
-
-    return filters
 
 def _safe_convert_to_numeric(value: Any, target_type: str) -> Any:
     """Safely convert value to integer or float with fallback."""
@@ -85,16 +63,41 @@ PROPERTY TYPES:
 - penthouse → "penthouse"
 - office → "office"
 
-FINANCIAL FILTERS:
-- RENT: "under 100k"→{{"rent_charge":{{"lte":100000}}}}, "150k-200k"→{{"rent_charge":{{"gte":150000,"lte":200000}}}}
-- SECURITY DEPOSIT: "deposit 10k"→{{"security_deposit":{{"lte":10000}}}}
-- MAINTENANCE: "maintenance 5k"→{{"maintenance_charge":{{"lte":5000}}}}
-- CONVERSIONS: K=thousand, M=million
+FINANCIAL FILTERS (CRITICAL - Handle ALL number formats intelligently):
+- RENT AMOUNTS: Extract rent_charge with proper conversion and range logic
+- NUMBER FORMATS TO HANDLE:
+  * "100000" → 100000 (direct number)
+  * "100k" → 100000 (k = thousand)
+  * "100 K" → 100000 (space before K)
+  * "100000 AED" → 100000 (with currency)
+  * "100k AED" → 100000 (k + currency)
+  * "1.5M" → 1500000 (M = million)
+  * "1,500,000" → 1500000 (comma-separated)
+- RANGE PATTERNS:
+  * "under/below/max/up to X" → {{"rent_charge":{{"lte":X}}}}
+  * "above/over/at least X" → {{"rent_charge":{{"gte":X}}}}
+  * "between X and Y" → {{"rent_charge":{{"gte":X,"lte":Y}}}}
+  * "X to Y" → {{"rent_charge":{{"gte":X,"lte":Y}}}}
+  * "X-Y" → {{"rent_charge":{{"gte":X,"lte":Y}}}}
+- EXAMPLES:
+  * "under 800000 AED" → {{"rent_charge":{{"lte":800000}}}}
+  * "below 100k" → {{"rent_charge":{{"lte":100000}}}}
+  * "100 K AED" → {{"rent_charge":{{"lte":100000}}}}
+  * "between 150k and 200k AED" → {{"rent_charge":{{"gte":150000,"lte":200000}}}}
+  * "500k to 800k" → {{"rent_charge":{{"gte":500000,"lte":800000}}}}
+- OTHER FINANCIAL FIELDS:
+  * SECURITY DEPOSIT: "deposit 10k"→{{"security_deposit":{{"lte":10000}}}}
+  * MAINTENANCE: "maintenance 5k"→{{"maintenance_charge":{{"lte":5000}}}}
+- CONVERSION RULES: Always convert to final numbers (no K/M suffixes in output)
 
-PROPERTY SPECS:
-- BEDROOMS: "2 bedroom"→{{"number_of_bedrooms":2}}
-- BATHROOMS: "3 bathroom"→{{"number_of_bathrooms":3}}
-- SIZE: "1500 sqft"→{{"property_size":1500}}, "built 2020"→{{"year_built":2020}}
+PROPERTY SPECS (Handle ALL number formats):
+- BEDROOMS: "2 bedroom"/"2 bed"/"2BR"→{{"number_of_bedrooms":2}}
+- BATHROOMS: "3 bathroom"/"3 bath"/"3BA"→{{"number_of_bathrooms":3}}
+- SIZE: "1500 sqft"/"1500 sq ft"/"1500 square feet"→{{"property_size":1500}}
+- YEAR BUILT: "built 2020"/"constructed 2018"/"2020 built"→{{"year_built":2020}}
+- FLOOR: "5th floor"/"ground floor"/"level 3"→{{"floor_level":"5th floor"}}
+- PLOT NUMBER: "plot 123"/"plot number 456"→{{"plot_number":123}}
+- UNIT NUMBER: "unit 789"/"apartment 101"→{{"apartment_unit_number":"789"}}
 
 FURNISHING & STATUS:
 - FURNISHING: "furnished"/"semi-furnished"/"unfurnished"
@@ -163,12 +166,28 @@ ENHANCED AMENITY EXTRACTION:
 
 EXTRACTION RULES:
 1. Use lowercase for all string values EXCEPT boosting status fields (use "Active" with capital A)
-2. Only extract explicitly mentioned filters
+2. Only extract explicitly mentioned filters - don't invent values
 3. For ranges, use gte/lte: {{"field":{{"gte":min,"lte":max}}}}
 4. Boolean amenities: set to true only if clearly mentioned
 5. Dates: convert to YYYY-MM-DD format
-6. Don't invent values - only extract what's clearly stated
-7. CRITICAL: Follow the exact boosting status mappings above - "prime"→carouselBoostingStatus, "premium"→premiumBoostingStatus, "verified"→bnb_verification_status, "best"→both verified+premium
+6. CRITICAL: Follow the exact boosting status mappings above - "prime"→carouselBoostingStatus, "premium"→premiumBoostingStatus, "verified"→bnb_verification_status, "best"→both verified+premium
+
+INTELLIGENT NUMBER CONVERSION (Handle ALL formats):
+- Convert "100 K" → 100000 (space + K = thousand)
+- Convert "100k" → 100000 (no space + k = thousand)  
+- Convert "1.5M" → 1500000 (M = million)
+- Convert "1,500,000" → 1500000 (remove commas)
+- Convert "100000 AED" → 100000 (remove currency)
+- Convert "100 K AED" → 100000 (space + K + currency)
+- Always output final numbers (no K/M suffixes in JSON)
+- Handle mixed formats: "150k to 200k AED" → {{"gte":150000,"lte":200000}}
+
+CONTEXT-AWARE EXTRACTION:
+- If user says "budget is 100k", extract as rent_charge upper limit
+- If user says "minimum 50k", extract as rent_charge lower limit  
+- If user says "around 100k", extract as range with ±10% tolerance
+- Consider conversation context for implicit filters
+- Use user preferences from previous messages when relevant
 
 User query: {query}
 
@@ -244,25 +263,25 @@ def _build_field_descriptions(settings) -> str:
 
 def extract_filters_with_llm_context_aware(query: str, llm_client: LLMClient) -> Dict[str, Any]:
     """
-    Extract filters using LLM with conversation context awareness.
+    Extract filters using LLM-only approach with conversation context awareness.
+    LLM handles all extraction logic including number conversions and format handling.
     This function uses dynamic configuration and scales to any property schema.
     """
     settings = get_settings()
     allowed_fields = list(settings.retrieval.filter_fields or [])
     field_types = dict(settings.database.field_types or {})
+    
     # Get conversation context
     conversation_context = _get_conversation_context(llm_client)
     user_preferences = _get_user_preferences(llm_client)
-    # First, apply basic regex extraction for simple patterns
-    filters = extract_basic_filters(query)
-    # Build dynamic prompt based on actual schema
+    
+    # Build dynamic prompt based on actual schema - LLM handles everything
     prompt = _build_dynamic_extraction_prompt(conversation_context, user_preferences, settings, query)
     raw = llm_client.generate(prompt).strip()
     llm_data = _json_from_text(raw)
-    # Merge hybrid filters with LLM results (LLM takes precedence for conflicts)
-    result = filters.copy()
-
-    # Process LLM results and merge
+    
+    # Process LLM results with type coercion
+    result = {}
     for key, value in llm_data.items():
         if key not in allowed_fields:
             continue
@@ -271,6 +290,7 @@ def extract_filters_with_llm_context_aware(query: str, llm_client: LLMClient) ->
         coerced = _coerce_value_by_type(normalized_value, ftype)
         if coerced is not None:
             result[key] = coerced
+    
     # Filter to only allowed fields
     result = {k: v for k, v in result.items() if k in allowed_fields}
     
@@ -349,12 +369,17 @@ def _build_dynamic_extraction_prompt(conversation_context: str, user_preferences
 
 def preprocess_query(query: str, llm_client: LLMClient) -> Tuple[str, Dict[str, Any]]:
     """
-    Preprocess query using LLM-only filter extraction restricted to configured fields.
-    The LLM handles all logic including boosting status mappings and case normalization.
+    Preprocess query using LLM-only filter extraction.
+    LLM handles ALL extraction logic including:
+    - Number format conversions (100k → 100000, 100 K → 100000, 1.5M → 1500000)
+    - Range detection (under/below/above/between patterns)
+    - Currency handling (AED amounts)
+    - Context-aware extraction from conversation history
+    - All filter types with superior flexibility vs regex patterns
     """
-    # Extract filters with conversation context - LLM handles everything
+    # Extract filters with conversation context - LLM handles everything intelligently
     filters = extract_filters_with_llm_context_aware(query, llm_client)
 
-    print("filters", filters)
+    print("Extracted filters:", filters)
     
     return query, filters

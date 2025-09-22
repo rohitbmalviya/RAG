@@ -504,30 +504,50 @@ class DynamicAlternativesGenerator:
         return []
     
     def _verify_alternative_exists(self, alternative: Dict[str, Any], retriever) -> bool:
-        """Verify that an alternative actually has properties in the database"""
+        """Improved alternative verification with better error handling"""
         try:
             filters = alternative.get("filters", {})
             suggestion = alternative.get("suggestion", "")
             
-            # Test if properties exist for this alternative
-            test_chunks = retriever.retrieve(suggestion, filters=filters, top_k=10)
+            # Test query with generic terms to avoid too specific searches
+            test_queries = [
+                suggestion,
+                f"property in {suggestion}",
+                "available properties"
+            ]
             
-            if test_chunks and len(test_chunks) >= 3:
-                # Must have at least 3 properties to be viable
-                alternative["count"] = f"{len(test_chunks)}+"
-                alternative["sample_properties"] = [
-                    {
-                        "title": chunk.metadata.get("property_title", "Unknown"),
-                        "rent": chunk.metadata.get("rent_charge", "N/A")
-                    }
-                    for chunk in test_chunks[:2]
-                ]
-                return True
+            for query in test_queries:
+                try:
+                    test_chunks = retriever.retrieve(query, filters=filters, top_k=15)
+                    
+                    if test_chunks and len(test_chunks) >= 3:
+                        # Verify chunks have actual property data
+                        valid_chunks = [
+                            chunk for chunk in test_chunks 
+                            if chunk.metadata.get("rent_charge") and 
+                               chunk.metadata.get("property_title")
+                        ]
+                        
+                        if len(valid_chunks) >= 3:
+                            alternative["count"] = f"{len(valid_chunks)}+"
+                            alternative["sample_properties"] = [
+                                {
+                                    "title": chunk.metadata.get("property_title", "Property"),
+                                    "rent": f"AED {chunk.metadata.get('rent_charge', 'N/A'):,}"
+                                }
+                                for chunk in valid_chunks[:2]
+                            ]
+                            return True
+                            
+                except Exception as e:
+                    self.llm_client._logger.debug(f"Test query failed for '{query}': {e}")
+                    continue
+            
+            return False
             
         except Exception as e:
             self.llm_client._logger.debug(f"Failed to verify alternative: {e}")
-        
-        return False
+            return False
 
 class DynamicResponseGenerator:
     """Dynamic LLM-based response generation"""
@@ -621,12 +641,20 @@ class LLMClient(BaseLLM):
         """Handle user responses to conversation flow (1, 2, yes, no)"""
         user_input = user_input.lower().strip()
         
-        # Get recent conversation context
-        recent_messages = self.conversation.get_messages()[-2:]  # Last 2 messages
+        # Get recent conversation context with proper message parsing
+        recent_messages = self.conversation.get_messages()[-4:]  # Last 4 messages
         last_assistant_message = ""
+        original_query_context = ""
+        
         for msg in reversed(recent_messages):
             if msg["role"] == "assistant":
                 last_assistant_message = msg["content"]
+                break
+        
+        # Get original user query for context
+        for msg in reversed(recent_messages):
+            if msg["role"] == "user" and msg["content"] not in ["1", "2", "yes", "no"]:
+                original_query_context = msg["content"]
                 break
         
         # Handle requirement gathering confirmation
@@ -646,32 +674,37 @@ class LLMClient(BaseLLM):
                 "I'm here to help you find the perfect property!"
             )
         
-        # Handle alternative selection
+        # Handle alternative selection with proper boosting
         elif user_input in ["1", "option 1", "first", "alternatives"] and "Try alternate searches" in last_assistant_message:
             preferences = self.conversation.get_preferences()
-            verified_alternatives = self._get_verified_alternatives(preferences, pipeline_state.retriever_client)
+            # Apply proper boosting filters based on original query context
+            enhanced_filters = preferences.copy()
+            # If original query was about "best" properties, apply boosting
+            if any(keyword in original_query_context.lower() for keyword in ["best", "top", "premium", "recommended"]):
+                enhanced_filters.update({
+                    "bnb_verification_status": "verified",
+                    "premiumBoostingStatus": "Active"
+                })
+            # Get verified alternatives with enhanced filters
+            verified_alternatives = self._get_verified_alternatives(enhanced_filters, pipeline_state.retriever_client)
             
             if verified_alternatives:
                 # Show properties for the first alternative
                 alt = verified_alternatives[0]
                 try:
-                    # Check if this is a "best property" query and add proper boosting filters
-                    filters = alt['filters'].copy()
-                    if "best" in last_assistant_message.lower():
-                        # Apply best property prioritization filters
-                        filters["bnb_verification_status"] = "verified"
-                        filters["premiumBoostingStatus"] = "Active"
+                    alt_filters = alt['filters'].copy()
+                    alt_filters.update(enhanced_filters)  # Merge with enhanced filters
                     
                     alt_chunks = pipeline_state.retriever_client.retrieve(
                         f"properties {alt['suggestion']}", 
-                        filters=filters, 
+                        filters=alt_filters, 
                         top_k=5
-                    )
+                    ) 
                     if alt_chunks:
                         context_prompt = self._build_context_and_prompt(f"Show me {alt['suggestion']}", alt_chunks)
                         response = self._safe_generate([{"role": "user", "content": context_prompt}])
                         self._add_conversation_messages(user_input, response)
-                        return response
+                        return response   
                 except Exception as e:
                     self._logger.warning(f"Failed to retrieve alternative properties: {e}")
                     return (
@@ -739,34 +772,74 @@ class LLMClient(BaseLLM):
         return response
 
     def _handle_average_price_query(self, user_input: str, retrieved_chunks: Optional[List[RetrievedChunk]] = None) -> str:
-        """Handle 'average price' queries with actual calculation"""
-        if retrieved_chunks:
-            avg_price = self._calculate_average_price(retrieved_chunks)
-            if avg_price:
-                response = f"The average rent for properties matching your criteria is AED {avg_price:,.0f} per year, based on {len(retrieved_chunks)} properties."
-            else:
-                response = "I couldn't calculate the average price from the available data."
-        else:
-            response = (
+        """Handle average price queries with proper calculation and no property sources"""
+        
+        if not retrieved_chunks:
+            return (
                 "I don't have enough data to calculate the average price for your query. "
                 "Could you please specify the location and property type you're interested in?"
             )
-
-        # Don't show individual properties for average queries
+        
+        # Calculate average from retrieved chunks
+        avg_price = self._calculate_average_price(retrieved_chunks, "rent_charge")
+        
+        if avg_price:
+            # Extract location context from chunks for better response
+            locations = set()
+            property_types = set()
+            
+            for chunk in retrieved_chunks:
+                if chunk.metadata.get("community"):
+                    locations.add(chunk.metadata.get("community"))
+                if chunk.metadata.get("emirate"):
+                    locations.add(chunk.metadata.get("emirate"))
+                if chunk.metadata.get("property_type_name"):
+                    property_types.add(chunk.metadata.get("property_type_name"))
+            
+            location_str = ", ".join(list(locations)[:2]) if locations else "the specified area"
+            type_str = ", ".join(list(property_types)[:2]) if property_types else "properties"
+            
+            response = (
+                f"The average rent for {type_str} in {location_str} is "
+                f"AED {avg_price:,.0f} per year, based on {len(retrieved_chunks)} available properties."
+            )
+            
+            # Add additional insights if possible
+            prices = [float(chunk.metadata.get("rent_charge", 0)) for chunk in retrieved_chunks 
+                     if chunk.metadata.get("rent_charge")]
+            if prices:
+                min_price = min(prices)
+                max_price = max(prices)
+                response += f"\n\nPrice range: AED {min_price:,.0f} - {max_price:,.0f} per year."
+        else:
+            response = "I couldn't calculate the average price from the available data for your specified criteria."
+        
+        # Important: Don't show property sources for average price queries
         self._add_conversation_messages(user_input, response)
         return response
 
     def _calculate_average_price(self, chunks: List[RetrievedChunk], field: str = "rent_charge") -> Optional[float]:
-        """Calculate average price from retrieved chunks"""
+        """Calculate average price from retrieved chunks with better error handling"""
         prices = []
+        
         for chunk in chunks:
             price = chunk.metadata.get(field)
-            if price and isinstance(price, (int, float)):
-                prices.append(float(price))
+            if price is not None:
+                try:
+                    # Handle different price formats
+                    if isinstance(price, str):
+                        # Remove commas and convert
+                        price_val = float(price.replace(",", ""))
+                    else:
+                        price_val = float(price)
+                    
+                    # Sanity check - prices should be reasonable for UAE
+                    if 10000 <= price_val <= 10000000:  # AED 10k to 10M per year
+                        prices.append(price_val)
+                except (ValueError, TypeError):
+                    continue
         
-        if prices:
-            return sum(prices) / len(prices)
-        return None
+        return sum(prices) / len(prices) if prices else None
 
     def _handle_property_query(self, user_input: str, retrieved_chunks: Optional[List[RetrievedChunk]] = None) -> str:
         """Handle property search queries using query_processor for preference extraction"""

@@ -48,11 +48,24 @@ AVAILABLE FIELDS:
 
 === COMPREHENSIVE FILTER EXTRACTION GUIDE ===
 
-LOCATION FILTERS:
-- EMIRATES: dubai, abu dhabi, sharjah, ajman, fujairah, ras al khaimah, umm al quwain
-- HIERARCHY: emirate > city > community > subcommunity
-- ABBREVIATIONS: JVC→jumeirah village circle, JBR→jumeirah beach residence, JLT→jumeirah lakes towers, DIFC→dubai international financial centre
-- EXAMPLES: "Dubai Marina" → {{"emirate":"dubai", "community":"dubai marina"}}
+CRITICAL IMPROVEMENTS FOR ACCURACY:
+
+BOOSTING STATUS DETECTION (VERY IMPORTANT):
+- "best property" or "best properties" → {{"bnb_verification_status": "verified", "premiumBoostingStatus": "Active"}}
+- "top property" or "recommended" → {{"bnb_verification_status": "verified", "premiumBoostingStatus": "Active"}}  
+- "premium property" or "premium" → {{"premiumBoostingStatus": "Active"}}
+- "prime property" or "prime" → {{"carouselBoostingStatus": "Active"}}
+- "verified property" or "verified" → {{"bnb_verification_status": "verified"}}
+
+LOCATION EXTRACTION (ENHANCED):
+- Always extract emirate AND community when both mentioned
+- "Dubai Marina" → {{"emirate": "dubai", "community": "dubai marina"}}
+- "JBR" or "Jumeirah Beach Residence" → {{"emirate": "dubai", "community": "jumeirah beach residence"}}
+- "Downtown Dubai" → {{"emirate": "dubai", "community": "downtown dubai"}}
+- "Business Bay" → {{"emirate": "dubai", "community": "business bay"}}
+- "JLT" or "Jumeirah Lakes Towers" → {{"emirate": "dubai", "community": "jumeirah lakes towers"}}
+- "JVC" or "Jumeirah Village Circle" → {{"emirate": "dubai", "community": "jumeirah village circle"}}
+- "DIFC" or "Dubai International Financial Centre" → {{"emirate": "dubai", "community": "dubai international financial centre"}}
 
 PROPERTY TYPES:
 - apartment/flat/condo → "apartment"
@@ -104,18 +117,6 @@ FURNISHING & STATUS:
 - PROPERTY STATUS: "listed"/"active"/"draft"/"review"
 - RENT TYPE: "lease"/"holiday home ready"/"management fees"
 - MAINTENANCE: "owner"/"tenant"/"shared" (maintenance_covered_by)
-
-VERIFICATION & BOOSTING (CRITICAL - Extract these based on user intent):
-- VERIFIED PROPERTY: "verified property", "verified listings" → {{"bnb_verification_status":"verified"}}
-- PREMIUM PROPERTY: "premium property", "premium listings", "premium" → {{"premiumBoostingStatus":"Active"}}
-- PRIME PROPERTY: "prime property", "prime listings", "prime" → {{"carouselBoostingStatus":"Active"}}
-- BEST PROPERTY: "best property", "best listings", "top property", "recommended" → {{"bnb_verification_status":"verified", "premiumBoostingStatus":"Active"}}
-
-IMPORTANT: 
-- When user says "prime" → use carouselBoostingStatus: "Active"
-- When user says "premium" → use premiumBoostingStatus: "Active"  
-- When user says "verified" → use bnb_verification_status: "verified"
-- When user says "best" → use both verified + premium boosting
 
 AMENITIES (Boolean - set to true if mentioned):
 - GYM: gym, fitness → gym_fitness_center
@@ -171,6 +172,16 @@ EXTRACTION RULES:
 4. Boolean amenities: set to true only if clearly mentioned
 5. Dates: convert to YYYY-MM-DD format
 6. CRITICAL: Follow the exact boosting status mappings above - "prime"→carouselBoostingStatus, "premium"→premiumBoostingStatus, "verified"→bnb_verification_status, "best"→both verified+premium
+
+EXACT VALUE MATCHING:
+- Use exact enum values: "furnished", "semi-furnished", "unfurnished"
+- Boosting status: "Active", "verified" (case-sensitive)
+- Property status: "listed" (case-sensitive)
+
+RANGE HANDLING (IMPROVED):
+- "under 100k" → {{"rent_charge": {{"lte": 100000}}}}
+- "above 50k" → {{"rent_charge": {{"gte": 50000}}}}  
+- "between 80k and 120k" → {{"rent_charge": {{"gte": 80000, "lte": 120000}}}}
 
 INTELLIGENT NUMBER CONVERSION (Handle ALL formats):
 - Convert "100 K" → 100000 (space + K = thousand)

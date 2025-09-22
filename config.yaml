@@ -174,13 +174,13 @@ database:
     property_view_id: keyword
 
 chunking:
-  chunk_size: 256 # Reduce from 500
-  chunk_overlap: 25 # Reduce from 50
+  chunk_size: 500 # Increased for better context
+  chunk_overlap: 50 # Increased for better continuity
   unit: token
 
 embedding:
   provider: google
-  model: models/text-embedding-004 # Use latest model
+  model: text-embedding-004 # Use latest model
   api_key: ${LLM_MODEL_API_KEY}
   batch_size: 10 # Reduce from 64 to avoid rate limits
 
@@ -197,8 +197,8 @@ vector_db:
   mapping_properties_key: properties
 
 retrieval:
-  top_k: 10 # Increase from 8
-  num_candidates_multiplier: 10 # Reduce from 20 for speed
+  top_k: 12 # Increased for better results
+  num_candidates_multiplier: 8 # Reduced for speed while maintaining quality
   filter_fields:
     # Location filters
     - emirate

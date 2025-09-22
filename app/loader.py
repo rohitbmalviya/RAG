@@ -48,6 +48,16 @@ def _compose_text(row: Dict[str, object], columns: List[str]) -> str:
     segments: List[str] = []
     amenities: List[str] = []
     
+    # Handle property type name first (from JOIN)
+    property_type_name = row.get("property_type_name")
+    if property_type_name:
+        segments.append(f"Property Type: {property_type_name}")
+    
+    # Handle rent type name (from JOIN)  
+    rent_type_name = row.get("rent_type_name")
+    if rent_type_name:
+        segments.append(f"Rent Type: {rent_type_name}")
+    
     for col in columns:
         value = row.get(col)
         if value is None:
@@ -57,6 +67,10 @@ def _compose_text(row: Dict[str, object], columns: List[str]) -> str:
 
         value_str = str(value).strip()
         if not value_str:
+            continue
+            
+        # Skip if we already handled these
+        if col in {"property_type_id", "rent_type_id", "property_type_name", "rent_type_name"}:
             continue
             
         # Handle boolean amenities specially
@@ -71,22 +85,6 @@ def _compose_text(row: Dict[str, object], columns: List[str]) -> str:
                 amenity_name = col.replace('_', ' ').replace('available', '').replace('  ', ' ').strip()
                 amenities.append(amenity_name.title())
             continue
-            
-        # Handle property/rent type value fields and legacy IDs
-        if col in {"property_type_id", "property_type"}:
-            property_type_name = row.get("property_type_name") or (value_str if col == "property_type" else None)
-            if property_type_name:
-                segments.append(f"Property Type: {property_type_name}")
-                continue
-        # Ensure property_type_name is always included when available
-        elif col == "property_type_name" and value_str:
-            segments.append(f"Property Type Name: {value_str}")
-            continue
-        elif col == "rent_type_id":
-            rent_type_name = row.get("rent_type_name")
-            if rent_type_name:
-                segments.append(f"Rent Type: {rent_type_name}")
-                continue
         
         # Handle special formatting for certain fields
         if col == "rent_charge":

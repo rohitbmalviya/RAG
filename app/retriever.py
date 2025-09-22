@@ -86,28 +86,39 @@ class Retriever:
         return location_match
 
     def _calculate_priority_score(self, metadata: Dict[str, Any]) -> float:
-        """Calculate priority score based on verification and boosting status"""
-        score = 0.0
+        """Enhanced priority score calculation with better differentiation"""
         
-        # Priority 1: All three (highest boost)
-        if (metadata.get("premiumBoostingStatus") == "Active" and 
-            metadata.get("carouselBoostingStatus") == "Active" and 
-            metadata.get("bnb_verification_status") == "verified"):
-            return 0.5  # Increased from 0.3
+        # Check exact status values (case-sensitive)
+        is_verified = metadata.get("bnb_verification_status") == "verified"
+        is_premium = metadata.get("premiumBoostingStatus") == "Active" 
+        is_carousel = metadata.get("carouselBoostingStatus") == "Active"
         
-        # Priority 2: Verified only
-        if metadata.get("bnb_verification_status") == "verified":
-            score += 0.3  # Increased from 0.2
+        # Priority 1: All three statuses (highest score)
+        if is_verified and is_premium and is_carousel:
+            return 0.6  # Increased for maximum priority
         
-        # Priority 3: Carousel (Prime)
-        if metadata.get("carouselBoostingStatus") == "Active":
-            score += 0.2  # Increased from 0.15
+        # Priority 2: Verified + Premium (high score)
+        if is_verified and is_premium:
+            return 0.5
         
-        # Priority 4: Premium
-        if metadata.get("premiumBoostingStatus") == "Active":
-            score += 0.15  # Increased from 0.1
+        # Priority 3: Verified + Carousel (high score) 
+        if is_verified and is_carousel:
+            return 0.45
         
-        return min(0.5, score)
+        # Priority 4: Verified only (good score)
+        if is_verified:
+            return 0.35
+        
+        # Priority 5: Premium only (medium score)
+        if is_premium:
+            return 0.25
+        
+        # Priority 6: Carousel only (low-medium score)
+        if is_carousel:
+            return 0.15
+        
+        # No boosting
+        return 0.0
 
     def _calculate_attribute_priority_score(self, metadata: Dict[str, Any], filters: Optional[Dict[str, Any]]) -> float:
         """

@@ -297,7 +297,7 @@ memory:
 
 # Requirement gathering configuration
 requirement_gathering:
-  endpoint: ${REQUIREMENT_ENDPOINT:-http://localhost:5000/backend/api/v1/user/requirement}
+  endpoint: http://localhost:5000/backend/api/v1/user/requirement
   retry_attempts: 3
   retry_delay: 2
   enabled: true

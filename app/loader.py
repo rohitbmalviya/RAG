@@ -7,7 +7,7 @@ from .config import Settings
 from .models import Document
 from .utils import get_logger
 
-# Constants to eliminate duplication
+
 UTF8_ENCODING = "utf-8"
 
 def _stringify_value(raw: Optional[object]) -> str:
@@ -48,12 +48,12 @@ def _compose_text(row: Dict[str, object], columns: List[str]) -> str:
     segments: List[str] = []
     amenities: List[str] = []
     
-    # Handle property type name first (from JOIN)
+    
     property_type_name = row.get("property_type_name")
     if property_type_name:
         segments.append(f"Property Type: {property_type_name}")
     
-    # Handle rent type name (from JOIN)  
+    
     rent_type_name = row.get("rent_type_name")
     if rent_type_name:
         segments.append(f"Rent Type: {rent_type_name}")
@@ -69,11 +69,11 @@ def _compose_text(row: Dict[str, object], columns: List[str]) -> str:
         if not value_str:
             continue
             
-        # Skip if we already handled these
+        
         if col in {"property_type_id", "rent_type_id", "property_type_name", "rent_type_name"}:
             continue
             
-        # Handle boolean amenities specially
+        
         if col in {
             "maids_room", "security_available", "concierge_available", "central_ac_heating",
             "elevators", "balcony_terrace", "storage_room", "laundry_room", "gym_fitness_center",
@@ -86,7 +86,7 @@ def _compose_text(row: Dict[str, object], columns: List[str]) -> str:
                 amenities.append(amenity_name.title())
             continue
         
-        # Handle special formatting for certain fields
+        
         if col == "rent_charge":
             segments.append(f"Annual Rent: AED {value_str}")
         elif col == "security_deposit":
@@ -104,13 +104,13 @@ def _compose_text(row: Dict[str, object], columns: List[str]) -> str:
         elif col == "developer_name":
             segments.append(f"Developer: {value_str}")
         elif col in {"parking", "swimming_pool", "public_transport_type", "retail_shopping_access"}:
-            # Handle JSON fields for amenities
+            
             if value_str and value_str != "null":
                 segments.append(f"{col.replace('_', ' ').title()}: {value_str}")
         else:
             segments.append(f"{col.replace('_', ' ').title()}: {value_str}")
     
-    # Add amenities as a single section
+    
     if amenities:
         segments.append(f"Amenities: {', '.join(amenities)}")
     
@@ -213,7 +213,7 @@ def _build_media_map(conn: "psycopg.Connection", property_ids: List[str]) -> Dic
             if entry:
                 media_map[pid] = entry
     except Exception:
-        # Swallow errors (table missing or permission issues)
+        
         return {}
     return media_map
 
@@ -229,7 +229,7 @@ def _create_document_from_row(
     for c in cols:
         metadata[c] = row.get(c)
     
-    # Extract media metadata if present
+    
     if "media" in row and row["media"]:
         try:
             media_md = _extract_media_metadata({"media": row["media"]})
@@ -257,7 +257,7 @@ def _load_documents_from_jsonl(path: str, settings: Settings) -> Iterable[Docume
             if not line.strip():
                 continue
             data = json.loads(line)
-            # Extract media-based image fields for downstream UI usage
+            
             media_md = _extract_media_metadata(data)
             if media_md:
                 data.update(media_md)
@@ -308,7 +308,6 @@ def _build_sql_query(table: str, quoted_id_col: str, quoted_cols: List[str], whe
     for col in [quoted_id_col] + quoted_cols:
         qualified_columns.append(f'p.{col}')
     qualified_select_cols = ", ".join(qualified_columns)
-    
     base_query = f"""
         SELECT {qualified_select_cols},
                pt.name as property_type_name,
@@ -337,9 +336,18 @@ def _create_document_from_sql_row(
     
     for c in cols:
         if c in row:
+            if c == "property_type_id" and "property_type_name" in row and row["property_type_name"]:
+                continue  
+            if c == "rent_type_id" and "rent_type_name" in row and row["rent_type_name"]:
+                continue  
             metadata[c] = row.get(c)
     
-    # Enrich from media_map if available
+    if "property_type_name" in row and row["property_type_name"]:
+        metadata["property_type_name"] = row["property_type_name"]
+    if "rent_type_name" in row and row["rent_type_name"]:
+        metadata["rent_type_name"] = row["rent_type_name"]
+    
+    
     if media_map and row_id in media_map:
         metadata.update(media_map[row_id])
     
@@ -377,13 +385,12 @@ def load_documents(settings: Settings, batch_size: int) -> Generator[List[Docume
                 while True:
                     rows: List[Dict[str, object]] = cur.fetchmany(batch_size)
                     if not rows:
-                        break
-                    # Build media map for this batch (if media table exists)
+                        break       
                     prop_ids: List[str] = [str(r[db.id_column]) for r in rows if r.get(db.id_column) is not None]
                     media_map = _build_media_map(conn, prop_ids)
                     documents: List[Document] = []
                     for row in rows:
-                        # Skip warning for derived image metadata fields
+                        
                         for c in cols:
                             if c not in row and c not in {"media"}:
                                 row_id = str(row[db.id_column])
@@ -393,7 +400,6 @@ def load_documents(settings: Settings, batch_size: int) -> Generator[List[Docume
                         documents.append(doc)
                     yield documents
         return
-
     if source_type == "csv" and source_path:
         yield from _yield_in_batches(_load_documents_from_csv(source_path, settings), batch_size)
         return
@@ -433,7 +439,7 @@ def load_document_by_id(settings: Settings, record_id: str) -> Optional[Document
                 row: Optional[Dict[str, object]] = cur.fetchone()
                 if not row:
                     return None
-                # Enrich media metadata if media table exists
+                
                 media_map = _build_media_map(conn, [record_id])
                 return _create_document_from_sql_row(row, table, cols, embed_cols, db.id_column, media_map)
     except Exception:

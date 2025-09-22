@@ -163,46 +163,64 @@ async def query_endpoint(request: QueryRequest) -> QueryResponse:
     if not request.query or not request.query.strip():
         raise HTTPException(status_code=400, detail="Query must not be empty")
     
+    print(f"\n🚀 QUERY ENDPOINT HIT:")
+    print(f"   Session ID: {request.session_id}")
+    print(f"   Raw Query: '{request.query}'")
+    print(f"   Top K: {request.top_k}")
+    
     # FIXED: Use session_id properly
     session_id = request.session_id or "default"
     
     # Create/get session-specific LLM client
     llm_client = session_manager.get_or_create_session(session_id)
+    print(f"   LLM Client: {type(llm_client).__name__}")
     
     # CRITICAL: Use the session LLM client, not pipeline_state.llm_client
+    print(f"\n🔍 PREPROCESSING QUERY:")
     normalized_query, filters = preprocess_query(request.query, llm_client)
+    print(f"   Normalized Query: '{normalized_query}'")
+    print(f"   Extracted Filters: {filters}")
+    
+    # Store extracted filters in LLM client for context
+    if hasattr(llm_client, '_last_extracted_filters'):
+        llm_client._last_extracted_filters = filters
     
     # Retrieve chunks for property queries
+    print(f"\n📚 RETRIEVING CHUNKS:")
     chunks: List[RetrievedChunk] = pipeline_state.retriever_client.retrieve(
         normalized_query,
         filters=filters,
         top_k=request.top_k,
     )
+    print(f"   Retrieved {len(chunks)} chunks")
     
-    # Use session-specific LLM client for chat
-    answer = llm_client.chat(normalized_query, retrieved_chunks=chunks)
+    # Use session-specific LLM client for chat - LLM determines if sources should be shown
+    print(f"\n🤖 LLM PROCESSING:")
+    answer, should_show_sources = llm_client.chat_with_source_decision(normalized_query, retrieved_chunks=chunks)
+    print(f"   Answer Length: {len(answer)} characters")
+    print(f"   Should Show Sources: {should_show_sources}")
     
-    # Determine if sources should be shown based on query type
-    show_sources = True
-    query_lower = request.query.lower()
-    
-    # Don't show sources for certain query types
-    if any(greeting in query_lower for greeting in ["hi", "hello", "hey"]):
-        show_sources = False
-    elif "what is" in query_lower or "define" in query_lower:
-        show_sources = False
-    elif "average" in query_lower and "price" in query_lower:
-        show_sources = False
-    
-    # Filter sources based on query type
-    if show_sources:
+    # Filter sources based on LLM decision and extracted filters
+    if should_show_sources:
         filtered_chunks = [c for c in chunks if getattr(c, "score", 1.0) >= 0.7]
+        
+        # Apply additional filtering based on extracted filters
+        if filters:
+            filtered_chunks = _apply_filter_compliance(filtered_chunks, filters)
+            print(f"   Applied filter compliance, remaining chunks: {len(filtered_chunks)}")
+        
         sources: List[SourceItem] = [
             SourceItem(score=c.score, text=c.text, metadata=c.metadata)
             for c in filtered_chunks
         ]
+        print(f"   Final filtered sources: {len(sources)}")
     else:
         sources = []
+        print(f"   No sources shown (LLM decision)")
+    
+    print(f"\n✅ RESPONSE READY:")
+    print(f"   Answer: {answer[:100]}...")
+    print(f"   Sources Count: {len(sources)}")
     
     return QueryResponse(answer=answer, sources=sources)
 
@@ -216,6 +234,43 @@ def _get_vector_dimensions() -> int:
     if pipeline_state.vector_store_client and pipeline_state.vector_store_client._config.dims:
         return int(pipeline_state.vector_store_client._config.dims)
     return pipeline_state.embedder_client.get_dimension()
+
+def _apply_filter_compliance(chunks: List[RetrievedChunk], filters: Dict[str, Any]) -> List[RetrievedChunk]:
+    """Apply filter compliance to ensure sources match extracted filters"""
+    filtered_chunks = []
+    
+    for chunk in chunks:
+        metadata = chunk.metadata
+        include_chunk = True
+        
+        # Check property type filter
+        if "property_type_name" in filters:
+            expected_type = filters["property_type_name"].lower()
+            actual_type = str(metadata.get("property_type_name", "")).lower()
+            if actual_type != expected_type:
+                print(f"   Filtering out {metadata.get('property_title', 'Unknown')} - type mismatch: {actual_type} != {expected_type}")
+                include_chunk = False
+        
+        # Check emirate filter
+        if include_chunk and "emirate" in filters:
+            expected_emirate = filters["emirate"].lower()
+            actual_emirate = str(metadata.get("emirate", "")).lower()
+            if actual_emirate != expected_emirate:
+                print(f"   Filtering out {metadata.get('property_title', 'Unknown')} - emirate mismatch: {actual_emirate} != {expected_emirate}")
+                include_chunk = False
+        
+        # Check community filter
+        if include_chunk and "community" in filters:
+            expected_community = filters["community"].lower()
+            actual_community = str(metadata.get("community", "")).lower()
+            if expected_community not in actual_community and actual_community not in expected_community:
+                print(f"   Filtering out {metadata.get('property_title', 'Unknown')} - community mismatch: {actual_community} != {expected_community}")
+                include_chunk = False
+        
+        if include_chunk:
+            filtered_chunks.append(chunk)
+    
+    return filtered_chunks
 
 def _process_documents_to_vectors(documents: List[Any], settings: Settings) -> tuple[List[Any], List[List[float]]]:
     """Process documents through chunking and embedding pipeline"""

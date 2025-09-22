@@ -7,19 +7,12 @@ from .core.base import BaseVectorStore
 from .models import Document
 from .utils import get_logger
 
-# Constants to eliminate duplication
 KEYWORD_TYPE = "keyword"
 TEXT_TYPE = "text"
 INTEGER_TYPE = "integer"
 FLOAT_TYPE = "float"
 
-# High-frequency filter fields that are stored at root level for performance
-HIGH_FREQUENCY_FILTERS = {
-    "emirate", "city", "property_type_id", "rent_type_id", 
-    "furnishing_status", "number_of_bedrooms", "number_of_bathrooms",
-    "property_status", "bnb_verification_status", "premiumBoostingStatus", 
-    "carouselBoostingStatus", "rent_charge", "property_size"
-}
+# All filters are now handled dynamically through metadata fields
 
 class VectorStoreClient(BaseVectorStore):
     def __init__(self, config: VectorDBConfig) -> None:
@@ -76,7 +69,6 @@ class VectorStoreClient(BaseVectorStore):
             return
         columns, filter_fields, field_types = self._get_settings_data()
 
-        # Default required fields
         props: Dict[str, Any] = {
             "id": {"type": KEYWORD_TYPE},
             "text": {"type": TEXT_TYPE},
@@ -167,12 +159,9 @@ class VectorStoreClient(BaseVectorStore):
                 "embedding": vec,
                 "metadata": doc.metadata,
             }
-            # Add essential fields for indexing
+            
             essential_fields = ["table", "source_id", "chunk_index", "chunk_offset", "chunk_unit"]
             self._process_metadata_fields(doc, source, essential_fields)
-            # Add only the most frequently used filter fields at root level for RAG performance
-            # These are the fields you'll filter on most often in your RAG queries
-            self._process_metadata_fields(doc, source, list(HIGH_FREQUENCY_FILTERS))
             actions.append({"_op_type": "index", "_index": index, "_id": doc.id, "_source": source})
         try:
             success, errors = bulk(
@@ -203,6 +192,13 @@ class VectorStoreClient(BaseVectorStore):
     ) -> List[Dict[str, Any]]:
         index = self._get_index_name()
         settings = get_settings()
+        
+        print(f"🔍 VECTOR STORE SEARCH DEBUG:")
+        print(f"   Index: {index}")
+        print(f"   Top K: {top_k}")
+        print(f"   Num Candidates: {num_candidates}")
+        print(f"   Filters received: {filters}")
+        
         knn = {
             "field": "embedding",
             "query_vector": query_vector,
@@ -211,42 +207,66 @@ class VectorStoreClient(BaseVectorStore):
         }
         es_query: Dict[str, Any] = {"knn": knn, "size": top_k}
         filter_clauses: List[Dict[str, Any]] = []
+        
         if filters:
             allowed = set(settings.retrieval.filter_fields or [])
+            print(f"   Allowed filter fields: {sorted(list(allowed))}")
             
             for key, value in filters.items():
                 if key not in allowed or value is None:
+                    print(f"   Skipping filter {key}: not allowed or None")
                     continue
                 
-                # Use root-level field for high-frequency filters (faster)
-                # Use metadata field for other filters (to avoid duplication)
-                filter_key = key if key in HIGH_FREQUENCY_FILTERS else f"metadata.{key}"
+                # Use consistent field mapping - all filters go to metadata unless specified otherwise
+                filter_key = f"metadata.{key}"
+                print(f"   Processing filter: {key} = {value} -> {filter_key}")
                 
                 if isinstance(value, dict):
+                    # Handle range queries (gte, lte, gt, lt)
                     range_clause: Dict[str, Any] = {"range": {filter_key: {}}}
                     for bound in ("gte", "lte", "gt", "lt"):
                         if bound in value:
                             range_clause["range"][filter_key][bound] = value[bound]
                     if range_clause["range"][filter_key]:
                         filter_clauses.append(range_clause)
+                        print(f"   Added range filter: {range_clause}")
                 elif isinstance(value, list):
+                    # Handle multiple values
                     filter_clauses.append({"terms": {filter_key: value}})
+                    print(f"   Added terms filter: {filter_key} in {value}")
                 else:
+                    # Handle single value
                     filter_clauses.append({"term": {filter_key: value}})
+                    print(f"   Added term filter: {filter_key} = {value}")
+        
         if filter_clauses:
             es_query["query"] = {"bool": {"filter": filter_clauses}}
-
+            print(f"   Final ES query with filters: {es_query}")
+        else:
+            print(f"   No filters applied, using KNN only")
+        
         try:
             resp = self._client.search(index=index, body=es_query, _source=True)
         except Exception as exc:
             self._logger.error("Vector store search request failed: %s", exc)
             raise
+        
         hits = resp.get("hits", {}).get("hits", [])
+        print(f"   Raw hits count: {len(hits)}")
+        
+        # Debug: Show property details for first few hits
+        for i, hit in enumerate(hits[:5], 1):
+            source = hit.get("_source", {})
+            metadata = source.get("metadata", {})
+            emirate = metadata.get("emirate", "Unknown")
+            property_type = metadata.get("property_type_name", "Unknown")
+            property_title = metadata.get("property_title", "Unknown")
+            print(f"   Hit {i}: {property_title} | Type: {property_type} | Emirate: {emirate}")
+        
         return hits
 
     def delete_by_source_id(self, source_id: str) -> int:
         index = self._get_index_name()
-        # Delete documents associated to the property id via source_id only
         query = {
             "bool": {
                 "should": [

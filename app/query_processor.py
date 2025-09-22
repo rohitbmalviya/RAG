@@ -67,7 +67,7 @@ LOCATION EXTRACTION (ENHANCED):
 - "JVC" or "Jumeirah Village Circle" → {{"emirate": "dubai", "community": "jumeirah village circle"}}
 - "DIFC" or "Dubai International Financial Centre" → {{"emirate": "dubai", "community": "dubai international financial centre"}}
 
-PROPERTY TYPES:
+PROPERTY TYPES (CRITICAL - Extract exact property type from user query):
 - apartment/flat/condo → "apartment"
 - villa/house → "villa"  
 - studio → "studio"
@@ -75,6 +75,10 @@ PROPERTY TYPES:
 - duplex → "duplex"
 - penthouse → "penthouse"
 - office → "office"
+- If user says "apartments" or "apartment" → MUST extract "property_type_name": "apartment"
+- If user says "villas" or "villa" → MUST extract "property_type_name": "villa"
+- If user says "studios" or "studio" → MUST extract "property_type_name": "studio"
+- ALWAYS extract property type when explicitly mentioned in query
 
 FINANCIAL FILTERS (CRITICAL - Handle ALL number formats intelligently):
 - RENT AMOUNTS: Extract rent_charge with proper conversion and range logic
@@ -173,6 +177,12 @@ EXTRACTION RULES:
 5. Dates: convert to YYYY-MM-DD format
 6. CRITICAL: Follow the exact boosting status mappings above - "prime"→carouselBoostingStatus, "premium"→premiumBoostingStatus, "verified"→bnb_verification_status, "best"→both verified+premium
 
+CRITICAL PROPERTY TYPE EXAMPLES:
+- "show me the property in dubai which are apartment" → {{"emirate": "dubai", "property_type_name": "apartment"}}
+- "find apartments in dubai" → {{"emirate": "dubai", "property_type_name": "apartment"}}
+- "show me villas in abu dhabi" → {{"emirate": "abu dhabi", "property_type_name": "villa"}}
+- "studios in dubai marina" → {{"emirate": "dubai", "community": "dubai marina", "property_type_name": "studio"}}
+
 EXACT VALUE MATCHING:
 - Use exact enum values: "furnished", "semi-furnished", "unfurnished"
 - Boosting status: "Active", "verified" (case-sensitive)
@@ -199,6 +209,22 @@ CONTEXT-AWARE EXTRACTION:
 - If user says "around 100k", extract as range with ±10% tolerance
 - Consider conversation context for implicit filters
 - Use user preferences from previous messages when relevant
+
+CRITICAL: ACCUMULATE FILTERS FROM CONVERSATION:
+- ALWAYS check conversation history for ALL previously mentioned filters
+- ACCUMULATE filters from the entire conversation, don't just extract from current query
+- If user previously mentioned location, property type, bedrooms, budget, etc., INCLUDE them all
+- Example: User said "show me properties in Dubai" then "I want villa with 3 bedrooms"
+  → Extract: {{"emirate": "dubai", "property_type_name": "villa", "number_of_bedrooms": 3}}
+- Example: User said "properties in Dubai" then "apartment" then "2 bedrooms" then "under 150k"
+  → Extract: {{"emirate": "dubai", "property_type_name": "apartment", "number_of_bedrooms": 2, "rent_charge": {{"lte": 150000}}}}
+- Example: User said "show me properties in Dubai" then "show me apartments"
+  → Extract: {{"emirate": "dubai", "property_type_name": "apartment"}}
+- ALWAYS preserve ALL context from conversation history when user doesn't specify new values
+- Only override filters if user explicitly mentions different values
+- Look for ALL filter keywords: locations, property types, bedrooms, bathrooms, budget, amenities, etc.
+- BUILD UPON previous filters, don't replace them unless explicitly changed
+- If conversation shows "Dubai" was mentioned, ALWAYS include "emirate": "dubai" in your output
 
 User query: {query}
 
@@ -278,6 +304,9 @@ def extract_filters_with_llm_context_aware(query: str, llm_client: LLMClient) ->
     LLM handles all extraction logic including number conversions and format handling.
     This function uses dynamic configuration and scales to any property schema.
     """
+    print(f"\n🔍 FILTER EXTRACTION DEBUG:")
+    print(f"   Query: '{query}'")
+    
     settings = get_settings()
     allowed_fields = list(settings.retrieval.filter_fields or [])
     field_types = dict(settings.database.field_types or {})
@@ -286,25 +315,60 @@ def extract_filters_with_llm_context_aware(query: str, llm_client: LLMClient) ->
     conversation_context = _get_conversation_context(llm_client)
     user_preferences = _get_user_preferences(llm_client)
     
-    # Build dynamic prompt based on actual schema - LLM handles everything
-    prompt = _build_dynamic_extraction_prompt(conversation_context, user_preferences, settings, query)
-    raw = llm_client.generate(prompt).strip()
-    llm_data = _json_from_text(raw)
+    print(f"   Conversation context: '{conversation_context[:200]}...'")
+    print(f"   User preferences: {user_preferences}")
     
-    # Process LLM results with type coercion
+    # Get existing filters from user preferences (stored from previous queries)
+    existing_filters = user_preferences
+    print(f"   Existing filters from user preferences: {existing_filters}")
+    
+    # Build dynamic prompt based on actual schema - LLM handles everything
+    prompt = _build_dynamic_extraction_prompt(conversation_context, user_preferences, settings, query, existing_filters)
+    print(f"   Prompt length: {len(prompt)} characters")
+    print(f"   Prompt preview: {prompt[:300]}...")
+    
+    raw = llm_client.generate(prompt).strip()
+    print(f"   LLM raw response: '{raw}'")
+    
+    llm_data = _json_from_text(raw)
+    print(f"   Parsed JSON: {llm_data}")
+    
+    # CRITICAL FIX: Merge with existing filters - new filters override existing ones
+    # But preserve existing filters that are not overridden
+    merged_filters = {**existing_filters, **llm_data}
+    print(f"   Merged filters: {merged_filters}")
+    
+    # DEBUG: Show what's being merged
+    print(f"   DEBUG MERGE:")
+    print(f"     Existing: {existing_filters}")
+    print(f"     New: {llm_data}")
+    print(f"     Final: {merged_filters}")
+    
+    # Process merged results with type coercion
     result = {}
-    for key, value in llm_data.items():
+    for key, value in merged_filters.items():
         if key not in allowed_fields:
+            print(f"   Skipping invalid field: {key}")
             continue
         ftype = field_types.get(key, "")
         normalized_value = _normalize_string_value(value, ftype, key)
         coerced = _coerce_value_by_type(normalized_value, ftype)
         if coerced is not None:
             result[key] = coerced
+            print(f"   Added filter: {key} = {coerced}")
     
     # Filter to only allowed fields
     result = {k: v for k, v in result.items() if k in allowed_fields}
     
+    # Store the result in conversation for next query
+    if hasattr(llm_client, 'conversation') and result:
+        try:
+            llm_client.conversation.update_preferences(result)
+            print(f"   Stored filters in conversation for next query")
+        except Exception as e:
+            print(f"   Error storing filters: {e}")
+    
+    print(f"   Final filters: {result}")
     return result
 
 def _get_conversation_context(llm_client: LLMClient) -> str:
@@ -316,8 +380,8 @@ def _get_conversation_context(llm_client: LLMClient) -> str:
     if not messages:
         return ""
     
-    # Get last 4 messages (2 user + 2 assistant) for context
-    recent_messages = messages[-4:]
+    # Get last 6 messages (3 user + 3 assistant) for better context
+    recent_messages = messages[-6:]
     context_parts = []
     
     for msg in recent_messages:
@@ -329,7 +393,9 @@ def _get_conversation_context(llm_client: LLMClient) -> str:
             content = msg["content"][:150] + "..." if len(msg["content"]) > 150 else msg["content"]
             context_parts.append(f"Assistant: {content}")
     
-    return " | ".join(context_parts)
+    context = " | ".join(context_parts)
+    print(f"   Conversation context extracted: {len(context)} characters")
+    return context
 
 def _get_user_preferences(llm_client: LLMClient) -> Dict[str, Any]:
     """Get user preferences from conversation history."""
@@ -338,12 +404,25 @@ def _get_user_preferences(llm_client: LLMClient) -> Dict[str, Any]:
     
     return llm_client.conversation.get_preferences()
 
-def _build_context_section(conversation_context: str, user_preferences: Dict[str, Any]) -> str:
+
+def _build_context_section(conversation_context: str, user_preferences: Dict[str, Any], existing_filters: Dict[str, Any] = None) -> str:
     """Build context section for the LLM prompt."""
     context_sections = []
     
     if conversation_context:
-        context_sections.append(f"CONVERSATION HISTORY:\n{conversation_context}")
+        context_sections.append(f"CONVERSATION HISTORY:\n{conversation_context}\n\nCRITICAL: Extract ALL filters mentioned in this conversation history, not just the current query. Build upon previous filters. If user previously mentioned location, property type, bedrooms, budget, etc., INCLUDE them all in your extraction. For example, if the conversation shows 'Dubai' was mentioned, you MUST include 'emirate': 'dubai' in your output.")
+    
+    if existing_filters:
+        filter_items = []
+        for key, value in existing_filters.items():
+            if isinstance(value, dict) and "lte" in value:
+                filter_items.append(f"{key}: up to {value['lte']}")
+            elif isinstance(value, dict) and "gte" in value:
+                filter_items.append(f"{key}: at least {value['gte']}")
+            else:
+                filter_items.append(f"{key}: {value}")
+        if filter_items:
+            context_sections.append(f"EXISTING FILTERS FROM CONVERSATION: {', '.join(filter_items)}\n\nCRITICAL: These filters MUST be included in your output. Only override them if the current query explicitly changes them.")
     
     if user_preferences:
         pref_items = []
@@ -363,19 +442,33 @@ def _build_context_section(conversation_context: str, user_preferences: Dict[str
     return ""
 
 def _build_dynamic_extraction_prompt(conversation_context: str, user_preferences: Dict[str, Any], 
-                                   settings, query: str) -> str:
+                                   settings, query: str, existing_filters: Dict[str, Any] = None) -> str:
     """
     Build a dynamic extraction prompt based on the actual database schema.
     This approach scales to any property field configuration.
     """
-    context_section = _build_context_section(conversation_context, user_preferences)
+    context_section = _build_context_section(conversation_context, user_preferences, existing_filters)
     field_descriptions = _build_field_descriptions(settings)
     
-    return LLM_FILTER_EXTRACTION_INSTRUCTIONS.format(
+    # Build the complete prompt with context
+    base_instructions = LLM_FILTER_EXTRACTION_INSTRUCTIONS.format(
         field_descriptions=field_descriptions,
-        context_section=context_section,
         query=query
     )
+    
+    # Insert context section before the final instructions
+    if context_section:
+        # Find the position to insert context (before "User query:")
+        insert_pos = base_instructions.find("User query:")
+        if insert_pos != -1:
+            final_prompt = base_instructions[:insert_pos] + context_section + base_instructions[insert_pos:]
+            print(f"   Context section added: {len(context_section)} characters")
+            return final_prompt
+        else:
+            print(f"   Warning: Could not find 'User query:' in prompt")
+    
+    print(f"   No context section added")
+    return base_instructions
 
 def preprocess_query(query: str, llm_client: LLMClient) -> Tuple[str, Dict[str, Any]]:
     """
@@ -390,6 +483,8 @@ def preprocess_query(query: str, llm_client: LLMClient) -> Tuple[str, Dict[str, 
     # Extract filters with conversation context - LLM handles everything intelligently
     filters = extract_filters_with_llm_context_aware(query, llm_client)
 
-    print("Extracted filters:", filters)
+    print("🔍 FILTER EXTRACTION DEBUG:")
+    print(f"   Query: '{query}'")
+    print(f"   Extracted filters: {filters}")
     
     return query, filters

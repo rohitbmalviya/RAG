@@ -162,18 +162,24 @@ async def query_endpoint(request: QueryRequest) -> QueryResponse:
         raise HTTPException(status_code=500, detail=SERVER_NOT_INITIALIZED)
     if not request.query or not request.query.strip():
         raise HTTPException(status_code=400, detail="Query must not be empty")
-    # Get or create session with proper LLM client initialization
+    
+    # FIXED: Use session_id properly
     session_id = request.session_id or "default"
+    
+    # Create/get session-specific LLM client
     llm_client = session_manager.get_or_create_session(session_id)
-    # Process query using dynamic LLM approach
+    
+    # CRITICAL: Use the session LLM client, not pipeline_state.llm_client
     normalized_query, filters = preprocess_query(request.query, llm_client)
+    
     # Retrieve chunks for property queries
     chunks: List[RetrievedChunk] = pipeline_state.retriever_client.retrieve(
         normalized_query,
         filters=filters,
         top_k=request.top_k,
     )
-    # Use dynamic LLM chat method which handles classification internally
+    
+    # Use session-specific LLM client for chat
     answer = llm_client.chat(normalized_query, retrieved_chunks=chunks)
     
     # Determine if sources should be shown based on query type

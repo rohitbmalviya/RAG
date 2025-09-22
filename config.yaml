@@ -109,9 +109,9 @@ database:
     subcommunity: keyword
 
     # Property type and status
-    property_type_id: keyword
+    property_type_name: keyword
     furnishing_status: keyword
-    rent_type_id: keyword
+    rent_type_name: keyword
     property_status: keyword
     maintenance_covered_by: keyword
 
@@ -207,9 +207,9 @@ retrieval:
     - subcommunity
 
     # Property type and status
-    - property_type_id
+    - property_type_name
     - furnishing_status
-    - rent_type_id
+    - rent_type_name
     - property_status
     - maintenance_covered_by
 
@@ -278,13 +278,13 @@ fallback:
   requirement_capture:
     imp_fields:
       - location
-      - property_type_id
+      - property_type_name
       - number_of_bedrooms
       - rent_charge
       - furnishing_status
       - nearby_landmarks
       - building_name
-      - rent_type_id
+      - rent_type_name
     save_to_table: user_requirements
     ask_confirmation: true
 
@@ -305,7 +305,7 @@ requirement_gathering:
   ask_user_confirmation: true
   priority_fields:
     - location
-    - property_type_id
+    - property_type_name
     - number_of_bedrooms
     - rent_charge
     - furnishing_status

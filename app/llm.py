@@ -39,11 +39,15 @@ class Conversation:
     def __init__(self):
         self.messages: List[Dict[str, str]] = []
         self.user_preferences: Dict[str, Any] = {}
+        self.last_filters: Dict[str, Any] = {}  # Track last successful filters
         self.conversation_summary: str = ""
         self.requirement_gathered: bool = False
 
     def add_message(self, role: str, content: str):
         self.messages.append({"role": role, "content": content})
+        # Keep only last 10 messages for memory management
+        if len(self.messages) > 10:
+            self.messages = self.messages[-10:]
 
     def get_messages(self) -> List[Dict[str, str]]:
         return self.messages
@@ -51,9 +55,24 @@ class Conversation:
     def update_preferences(self, preferences: Dict[str, Any]):
         """Update user preferences from conversation"""
         self.user_preferences.update(preferences)
+        self.last_filters = preferences  # Track for context
 
     def get_preferences(self) -> Dict[str, Any]:
         return self.user_preferences
+
+    def get_context_for_query(self, current_query: str) -> str:
+        """Get relevant context for current query"""
+        if not self.messages:
+            return ""
+        
+        # Get last 2 exchanges
+        recent = self.messages[-4:] if len(self.messages) >= 4 else self.messages
+        context = []
+        for msg in recent:
+            if msg["role"] == "user":
+                context.append(f"Previously asked: {msg['content']}")
+        
+        return " | ".join(context)
 
     def set_requirement_gathered(self, gathered: bool):
         self.requirement_gathered = gathered
@@ -117,19 +136,18 @@ def _safe_llm_generate_with_fallback(llm_client, prompt: str, fallback_response:
 
 # Common prompt templates
 def _build_query_classification_template() -> str:
-    """Build the query classification template with proper formatting"""
-    # Use string replacement to avoid f-string brace conflicts
-    template = """Classify this user query for a {agent_description}.
+    """Build the simplified query classification template"""
+    return """Classify this query for a UAE property assistant.
 
-QUERY: "{query}"
+Query: "{query}"
 
-Classify into ONE of these categories and return ONLY a JSON object:
+Return ONLY this JSON format:
+{{"category": "greeting|property_search|general", "confidence": 0.9}}
 
-{{
-    "category": "greeting|general_knowledge|best_property|average_price|property_search|outside_uae|general|conversation_response",
-    "confidence": 0.95,
-    "reasoning": "{brief_explanation} of classification"
-}}
+Categories:
+- greeting: hi, hello, good morning
+- property_search: looking for properties, apartments, villas, show me, find me
+- general: everything else
 
 CATEGORIES:
 - "greeting": Simple greetings (hi, hello, good morning, etc.)

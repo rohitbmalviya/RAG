@@ -174,15 +174,15 @@ database:
     property_view_id: keyword
 
 chunking:
-  chunk_size: 500
-  chunk_overlap: 50
+  chunk_size: 256 # Reduce from 500
+  chunk_overlap: 25 # Reduce from 50
   unit: token
 
 embedding:
   provider: google
-  model: gemini-embedding-001 # Explicitly set to gemini-embedding-001
+  model: models/text-embedding-004 # Use latest model
   api_key: ${LLM_MODEL_API_KEY}
-  batch_size: 64
+  batch_size: 10 # Reduce from 64 to avoid rate limits
 
 vector_db:
   provider: elasticsearch
@@ -193,12 +193,12 @@ vector_db:
   index: rag_properties
   similarity: cosine
   refresh_on_write: false
-  dims: 3072 # Correct dimensions for gemini-embedding-001 (default)
+  dims: 768 # Correct dimensions for text-embedding-004
   mapping_properties_key: properties
 
 retrieval:
-  top_k: 8
-  num_candidates_multiplier: 20
+  top_k: 10 # Increase from 8
+  num_candidates_multiplier: 10 # Reduce from 20 for speed
   filter_fields:
     # Location filters
     - emirate
@@ -262,7 +262,7 @@ retrieval:
 
 llm:
   provider: google
-  model: ${LLM_MODEL_NAME}
+  model: gemini-2.5-flash-lite
   temperature: 0.2
   max_output_tokens: 1024
 
@@ -297,7 +297,9 @@ memory:
 
 # Requirement gathering configuration
 requirement_gathering:
-  endpoint: "http://localhost:5000/backend/api/v1/user/requirement"
+  endpoint: ${REQUIREMENT_ENDPOINT:-http://localhost:5000/backend/api/v1/user/requirement}
+  retry_attempts: 3
+  retry_delay: 2
   enabled: true
   auto_save_on_conversation_end: true
   ask_user_confirmation: true

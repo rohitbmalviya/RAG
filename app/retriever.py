@@ -87,36 +87,27 @@ class Retriever:
 
     def _calculate_priority_score(self, metadata: Dict[str, Any]) -> float:
         """Calculate priority score based on verification and boosting status"""
-        # Define priority conditions and their scores
-        priority_conditions = [
-            # Priority 1: All three conditions met (premium + prime + verified)
-            (
-                self._check_metadata_condition(metadata, "premiumBoostingStatus", ACTIVE_STATUS) and
-                self._check_metadata_condition(metadata, "carouselBoostingStatus", ACTIVE_STATUS) and
-                self._check_metadata_condition(metadata, "bnb_verification_status", VERIFIED_STATUS),
-                0.3
-            ),
-            # Priority 2: Verified only
-            (
-                self._check_metadata_condition(metadata, "bnb_verification_status", VERIFIED_STATUS),
-                0.2
-            ),
-            # Priority 3: Prime boosting only
-            (
-                self._check_metadata_condition(metadata, "carouselBoostingStatus", ACTIVE_STATUS),
-                0.15
-            ),
-            # Priority 4: Premium boosting only
-            (
-                self._check_metadata_condition(metadata, "premiumBoostingStatus", ACTIVE_STATUS),
-                0.1
-            )
-        ]
-        # Return the first matching condition's score
-        for condition, score in priority_conditions:
-            if condition:
-                return score
-        return 0.0
+        score = 0.0
+        
+        # Priority 1: All three (highest boost)
+        if (metadata.get("premiumBoostingStatus") == "Active" and 
+            metadata.get("carouselBoostingStatus") == "Active" and 
+            metadata.get("bnb_verification_status") == "verified"):
+            return 0.5  # Increased from 0.3
+        
+        # Priority 2: Verified only
+        if metadata.get("bnb_verification_status") == "verified":
+            score += 0.3  # Increased from 0.2
+        
+        # Priority 3: Carousel (Prime)
+        if metadata.get("carouselBoostingStatus") == "Active":
+            score += 0.2  # Increased from 0.15
+        
+        # Priority 4: Premium
+        if metadata.get("premiumBoostingStatus") == "Active":
+            score += 0.15  # Increased from 0.1
+        
+        return min(0.5, score)
 
     def _calculate_attribute_priority_score(self, metadata: Dict[str, Any], filters: Optional[Dict[str, Any]]) -> float:
         """

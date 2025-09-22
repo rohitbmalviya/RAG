@@ -76,7 +76,38 @@ class PipelineState:
 pipeline_state = PipelineState()
 
 # Session management for conversations
-conversation_sessions: Dict[str, Any] = {}
+from datetime import datetime, timedelta
+
+class SessionManager:
+    def __init__(self, ttl_minutes: int = 30):
+        self.sessions = {}
+        self.last_activity = {}
+        self.ttl = timedelta(minutes=ttl_minutes)
+    
+    def get_or_create_session(self, session_id: str):
+        self._cleanup_expired()
+        if session_id not in self.sessions:
+            from .factories import build_llm
+            self.sessions[session_id] = build_llm(
+                pipeline_state.settings.llm,
+                fallback_api_key=pipeline_state.settings.embedding.api_key
+            )
+        self.last_activity[session_id] = datetime.now()
+        return self.sessions[session_id]
+    
+    def _cleanup_expired(self):
+        now = datetime.now()
+        expired = [
+            sid for sid, last in self.last_activity.items()
+            if now - last > self.ttl
+        ]
+        for sid in expired:
+            del self.sessions[sid]
+            del self.last_activity[sid]
+            logger.info(f"Cleaned up expired session: {sid}")
+
+# Replace global conversation_sessions with:
+session_manager = SessionManager(ttl_minutes=30)
 
 def initialize_components() -> None:
     settings = get_settings(os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.yaml"))
@@ -133,13 +164,7 @@ async def query_endpoint(request: QueryRequest) -> QueryResponse:
         raise HTTPException(status_code=400, detail="Query must not be empty")
     # Get or create session with proper LLM client initialization
     session_id = request.session_id or "default"
-    if session_id not in conversation_sessions:
-        # Create a new LLM client instance for this session
-        from .factories import build_llm
-        llm_client = build_llm(pipeline_state.settings.llm, fallback_api_key=pipeline_state.settings.embedding.api_key)
-        conversation_sessions[session_id] = llm_client
-    else:
-        llm_client = conversation_sessions[session_id]
+    llm_client = session_manager.get_or_create_session(session_id)
     # Process query using dynamic LLM approach
     normalized_query, filters = preprocess_query(request.query, llm_client)
     # Retrieve chunks for property queries
@@ -150,12 +175,29 @@ async def query_endpoint(request: QueryRequest) -> QueryResponse:
     )
     # Use dynamic LLM chat method which handles classification internally
     answer = llm_client.chat(normalized_query, retrieved_chunks=chunks)
-    # Filter chunks by score and create sources
-    filtered_chunks = [c for c in chunks if getattr(c, "score", 1.0) >= 0.7]
-    sources: List[SourceItem] = [
-        SourceItem(score=c.score, text=c.text, metadata=c.metadata)
-        for c in filtered_chunks
-    ]
+    
+    # Determine if sources should be shown based on query type
+    show_sources = True
+    query_lower = request.query.lower()
+    
+    # Don't show sources for certain query types
+    if any(greeting in query_lower for greeting in ["hi", "hello", "hey"]):
+        show_sources = False
+    elif "what is" in query_lower or "define" in query_lower:
+        show_sources = False
+    elif "average" in query_lower and "price" in query_lower:
+        show_sources = False
+    
+    # Filter sources based on query type
+    if show_sources:
+        filtered_chunks = [c for c in chunks if getattr(c, "score", 1.0) >= 0.7]
+        sources: List[SourceItem] = [
+            SourceItem(score=c.score, text=c.text, metadata=c.metadata)
+            for c in filtered_chunks
+        ]
+    else:
+        sources = []
+    
     return QueryResponse(answer=answer, sources=sources)
 
 def _validate_components() -> None:

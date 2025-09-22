@@ -17,6 +17,24 @@ except ImportError:
     pipeline_state = None
 
 
+class RequirementGatheringMetrics:
+    def __init__(self):
+        self.total_attempts = 0
+        self.successful_sends = 0
+        self.failed_sends = 0
+        
+    def log_attempt(self, success: bool):
+        self.total_attempts += 1
+        if success:
+            self.successful_sends += 1
+        else:
+            self.failed_sends += 1
+        
+        if self.total_attempts % 10 == 0:
+            logger.info(
+                f"Requirement gathering stats: {self.successful_sends}/{self.total_attempts} successful"
+            )
+
 class Conversation:
     def __init__(self):
         self.messages: List[Dict[str, str]] = []
@@ -51,8 +69,154 @@ class Conversation:
 
 LLM_PROVIDERS: Dict[str, Type["BaseLLMProvider"]] = {}
 
-# Consolidated system prompt with all instructions
-COMPLETE_SYSTEM_PROMPT = """You are LeaseOasis, a conversational UAE property leasing assistant with conversational memory.
+# Common identity and introduction text
+AGENT_IDENTITY = "LeaseOasis, your friendly UAE property assistant"
+AGENT_DESCRIPTION = "UAE property leasing assistant"
+AGENT_SPECIALIZATION = "help people find the perfect place to lease in Dubai, Abu Dhabi, and other UAE cities"
+# Common instruction patterns
+JSON_ONLY_INSTRUCTION = "Return ONLY a JSON"
+NO_ADDITIONAL_TEXT = "no additional text"
+BRIEF_EXPLANATION = "Brief explanation"
+# Common response patterns
+FALLBACK_GREETINGS = [
+    f"Hello! I'm {AGENT_IDENTITY}. I'm here to help you find the perfect property to lease in the UAE. Which city are you interested in — Dubai, Abu Dhabi, or somewhere else?",
+    f"Hi there! Welcome to LeaseOasis! I specialize in helping people find great properties to lease in the UAE. What brings you here today?",
+    f"Hey! Great to meet you! I'm {AGENT_IDENTITY}. What type of property are you looking for?"
+]
+FALLBACK_GENERAL_RESPONSE = (
+    "I'd be happy to explain that! However, I'm specifically designed to help you find properties to lease in the UAE. "
+    "If you have questions about property types, leasing terms, or UAE-specific property information, I can help with that. "
+    "Would you like to search for properties instead?"
+)
+
+# Common JSON extraction patterns
+def _extract_json_from_response(response: str, expected_type: str = "object") -> Any:
+    """Centralized JSON extraction with error handling"""
+    try:
+        response = response.strip()
+        if expected_type == "object":
+            json_match = re.search(r'\{.*\}', response, re.DOTALL)
+        elif expected_type == "array":
+            json_match = re.search(r'\[.*\]', response, re.DOTALL)
+        else:
+            json_match = re.search(r'[\{\[].*[\}\]', response, re.DOTALL)
+        
+        if json_match:
+            return json.loads(json_match.group(0))
+    except Exception:
+        pass
+    return None if expected_type == "object" else []
+
+def _safe_llm_generate_with_fallback(llm_client, prompt: str, fallback_response: str) -> str:
+    """Centralized LLM generation with fallback handling"""
+    try:
+        response = llm_client.generate(prompt).strip()
+        return response if response else fallback_response
+    except Exception:
+        return fallback_response
+
+# Common prompt templates
+def _build_query_classification_template() -> str:
+    """Build the query classification template with proper formatting"""
+    # Use string replacement to avoid f-string brace conflicts
+    template = """Classify this user query for a {agent_description}.
+
+QUERY: "{query}"
+
+Classify into ONE of these categories and return ONLY a JSON object:
+
+{{
+    "category": "greeting|general_knowledge|best_property|average_price|property_search|outside_uae|general|conversation_response",
+    "confidence": 0.95,
+    "reasoning": "{brief_explanation} of classification"
+}}
+
+CATEGORIES:
+- "greeting": Simple greetings (hi, hello, good morning, etc.)
+- "general_knowledge": Questions about property terms, definitions, explanations
+- "best_property": Queries asking for "best", "top", "premium", "featured" properties
+- "average_price": Queries asking for average/typical/mean prices or costs
+- "property_search": Queries looking for specific properties to lease/rent
+- "outside_uae": Queries about properties outside UAE (non-UAE locations)
+- "general": General property-related queries that don't fit other categories
+- "conversation_response": Responses to conversation flow (1, 2, yes, no, etc.)
+
+RULES:
+- Use high confidence (0.8+) for clear matches
+- Use lower confidence (0.6-0.8) for ambiguous cases
+- Consider context and intent, not just keywords
+- For conversation responses, check for simple responses like "1", "2", "yes", "no"
+
+Output JSON:"""
+    
+    # Replace only the constants, leave {query} for later formatting
+    return template.replace("{agent_description}", AGENT_DESCRIPTION).replace("{brief_explanation}", BRIEF_EXPLANATION)
+GREETING_RESPONSE_TEMPLATE = f"""Generate a warm, friendly greeting response for a {AGENT_DESCRIPTION}.
+
+USER GREETING: "{{user_input}}"
+CONVERSATION HISTORY: {{conversation_count}} messages
+
+Generate a natural, engaging greeting response that:
+- Welcomes the user warmly
+- Introduces yourself as {AGENT_IDENTITY}
+- Asks an engaging follow-up question about their property search
+- Sounds human and conversational
+- Keeps it brief but inviting
+
+EXAMPLES OF GOOD FOLLOW-UP QUESTIONS:
+- "Which UAE city are you interested in?"
+- "What brings you here today?"
+- "Are you looking for your first property or moving to a new area?"
+- "What type of property are you considering?"
+
+Return ONLY the greeting response, {NO_ADDITIONAL_TEXT}."""
+GENERAL_KNOWLEDGE_TEMPLATE = f"""Generate a helpful response about property knowledge for a {AGENT_DESCRIPTION}.
+
+USER QUESTION: "{{user_input}}"
+
+Generate a response that:
+- Answers the question clearly and helpfully
+- Uses simple, easy-to-understand language
+- Relates to UAE property context when relevant
+- Guides the user back to property search
+- Keeps it concise but informative
+
+If the question is about property terms, provide a clear definition.
+If the question is unrelated to properties, politely redirect to property-related topics.
+
+Return ONLY the response, {NO_ADDITIONAL_TEXT}."""
+ALTERNATIVES_GENERATION_TEMPLATE = """Generate alternative property search options for a user with these preferences:
+
+CURRENT PREFERENCES: {preferences}
+
+Generate 3-5 alternative search options that could help the user find similar properties.
+Return ONLY a JSON array of alternatives.
+
+Each alternative should have this format:
+{{
+    "type": "location|budget|property_type|amenities|furnishing",
+    "suggestion": "Human-readable suggestion",
+    "filters": {{"field": "value"}},
+    "reasoning": "Why this alternative might work"
+}}
+
+ALTERNATIVE TYPES:
+- "location": Nearby areas, different communities, or adjacent emirates
+- "budget": Flexible budget options (+/- 20%)
+- "property_type": Similar property types (apartment→studio, villa→townhouse)
+- "amenities": Relaxed amenity requirements
+- "furnishing": Different furnishing options
+
+RULES:
+- Only suggest alternatives that make sense for UAE properties
+- For location: suggest nearby communities or adjacent emirates
+- For budget: suggest ±20% flexibility
+- For property type: suggest similar but different types
+- Be practical and realistic
+- Focus on what would actually help find more properties
+
+Output JSON array:"""
+COMPLETE_SYSTEM_PROMPT = f"""You are {AGENT_IDENTITY} with conversational memory.
 
 CONVERSATION PERSONALITY:
 - Sound like a knowledgeable, friendly UAE property expert who genuinely cares about helping users
@@ -153,7 +317,7 @@ UAE ONLY POLICY (Sources: Empty):
 - Keep sources empty
 
 IDENTITY QUERIES (Sources: Empty):
-- Respond: 'I am LeaseOasis, your friendly UAE property assistant. I help people find the perfect place to lease in Dubai, Abu Dhabi, and other UAE cities.'
+- Respond: 'I am {AGENT_IDENTITY}. I {AGENT_SPECIALIZATION}.'
 - Ask how you can help with their property search
 - Keep sources empty
 
@@ -270,43 +434,12 @@ class DynamicQueryClassifier:
     
     def classify_query(self, query: str) -> Dict[str, Any]:
         """Classify query using LLM for dynamic, scalable classification"""
-        prompt = f"""Classify this user query for a UAE property leasing assistant.
-
-QUERY: "{query}"
-
-Classify into ONE of these categories and return ONLY a JSON object:
-
-{{
-    "category": "greeting|general_knowledge|best_property|average_price|property_search|outside_uae|general|conversation_response",
-    "confidence": 0.95,
-    "reasoning": "Brief explanation of classification"
-}}
-
-CATEGORIES:
-- "greeting": Simple greetings (hi, hello, good morning, etc.)
-- "general_knowledge": Questions about property terms, definitions, explanations
-- "best_property": Queries asking for "best", "top", "premium", "featured" properties
-- "average_price": Queries asking for average/typical/mean prices or costs
-- "property_search": Queries looking for specific properties to lease/rent
-- "outside_uae": Queries about properties outside UAE (non-UAE locations)
-- "general": General property-related queries that don't fit other categories
-- "conversation_response": Responses to conversation flow (1, 2, yes, no, etc.)
-
-RULES:
-- Use high confidence (0.8+) for clear matches
-- Use lower confidence (0.6-0.8) for ambiguous cases
-- Consider context and intent, not just keywords
-- For conversation responses, check for simple responses like "1", "2", "yes", "no"
-
-Output JSON:"""
+        prompt = _build_query_classification_template().format(query=query)
 
         try:
             response = self.llm_client.generate(prompt).strip()
-            
-            # Extract JSON from response
-            json_match = re.search(r'\{.*\}', response, re.DOTALL)
-            if json_match:
-                result = json.loads(json_match.group(0))
+            result = _extract_json_from_response(response, "object")
+            if result:
                 return result
         except Exception:
             pass
@@ -333,147 +466,7 @@ Output JSON:"""
             return {"category": "property_search", "confidence": 0.5, "reasoning": "Default to property search"}
 
 
-class DynamicPreferenceExtractor:
-    """Dynamic LLM-based preference extraction"""
-    
-    def __init__(self, llm_client):
-        self.llm_client = llm_client
-    
-    def extract_preferences_from_conversation(self, messages: List[Dict[str, str]]) -> Dict[str, Any]:
-        """Extract preferences using LLM for dynamic, scalable extraction"""
-        if not messages:
-            return {}
-        
-        # Get recent user messages for context
-        user_messages = [msg["content"] for msg in messages if msg["role"] == "user"][-5:]  # Last 5 messages
-        if not user_messages:
-            return {}
-        
-        conversation_text = " ".join(user_messages)
-        
-        # Use LLM for intelligent preference extraction
-        llm_preferences = self._extract_with_llm(conversation_text)
-        if llm_preferences:
-            return llm_preferences
-        
-        # Fallback to regex-based extraction for critical fields
-        return self._fallback_regex_extraction(messages)
-    
-    def _extract_with_llm(self, conversation_text: str) -> Dict[str, Any]:
-        """Extract preferences using LLM"""
-        prompt = f"""Extract user preferences from this conversation about UAE property leasing.
-Return ONLY a JSON object with the extracted preferences. If nothing found, return {{}}.
-
-CONVERSATION: {conversation_text}
-
-AVAILABLE PROPERTY FIELDS (use these exact field names):
-- emirate, city, community, subcommunity
-- rent_charge (use {{"lte": amount}} for "under/below/max/up to" or {{"gte": amount}} for "above/over/at least")
-- number_of_bedrooms, number_of_bathrooms, property_size, year_built
-- property_type_id (apartment, villa, studio, townhouse, duplex, penthouse, office)
-- furnishing_status (furnished, semi-furnished, unfurnished)
-- lease_duration, payment_terms, sublease_allowed
-- available_from, lease_start_date, lease_end_date
-- swimming_pool, gym_fitness_center, parking, balcony_terrace, beach_access, elevators
-- security_available, concierge_available, pet_friendly, central_ac_heating, smart_home_features
-- bnb_verification_status, premiumBoostingStatus, carouselBoostingStatus
-
-EXTRACTION RULES:
-1. LOCATION: Extract emirate, city, community, subcommunity from any UAE location mentioned
-2. BUDGET: Extract rent_charge with proper range format
-3. PROPERTY SPECS: Extract bedrooms, bathrooms, size, year built
-4. PROPERTY TYPE: Map to standard types
-5. FURNISHING: Extract furnishing status
-6. AMENITIES: Extract boolean amenities (true/false)
-7. LEASE TERMS: Extract lease duration and terms
-8. DATES: Extract availability and lease dates
-9. VERIFICATION: Extract verification and boosting status
-
-IMPORTANT:
-- Convert all amounts to numbers (e.g., "100k" = 100000, "1.5M" = 1500000)
-- Use lowercase for text fields
-- Only include explicitly mentioned preferences
-- Be conservative - don't assume preferences not clearly stated
-- Use proper JSON format with correct data types
-
-Output JSON:"""
-
-        try:
-            response = self.llm_client.generate(prompt).strip()
-            
-            # Try to extract JSON from response
-            json_match = re.search(r'\{.*\}', response, re.DOTALL)
-            if json_match:
-                result = json.loads(json_match.group(0))
-                # Validate and clean the result
-                return self._validate_preferences(result)
-        except Exception as e:
-            self.llm_client._logger.warning(f"LLM preference extraction failed: {e}")
-        
-        return {}
-    
-    def _validate_preferences(self, preferences: Dict[str, Any]) -> Dict[str, Any]:
-        """Validate and clean extracted preferences"""
-        validated = {}
-        
-        for key, value in preferences.items():
-            # Validate field names and values
-            if key in ["emirate", "city", "community", "subcommunity"] and isinstance(value, str):
-                validated[key] = value.lower().strip()
-            elif key == "rent_charge" and isinstance(value, dict):
-                # Validate budget format
-                if ("lte" in value or "gte" in value) and isinstance(value.get("lte", value.get("gte")), (int, float)):
-                    validated[key] = value
-            elif key in ["number_of_bedrooms", "number_of_bathrooms", "property_size", "year_built"] and isinstance(value, (int, float)):
-                validated[key] = int(value)
-            elif key == "property_type_id" and value in ["apartment", "villa", "studio", "townhouse", "duplex", "penthouse", "office"]:
-                validated[key] = value
-            elif key == "furnishing_status" and value in ["furnished", "semi-furnished", "unfurnished"]:
-                validated[key] = value
-            elif key in ["swimming_pool", "gym_fitness_center", "parking", "balcony_terrace", "beach_access", "elevators", 
-                        "security_available", "concierge_available", "pet_friendly", "central_ac_heating", "smart_home_features"]:
-                validated[key] = bool(value)
-            elif key in ["available_from", "lease_start_date", "lease_end_date"] and isinstance(value, str):
-                validated[key] = value
-            elif key in ["bnb_verification_status", "premiumBoostingStatus", "carouselBoostingStatus"] and isinstance(value, str):
-                validated[key] = value
-        
-        return validated
-    
-    def _fallback_regex_extraction(self, messages: List[Dict[str, str]]) -> Dict[str, Any]:
-        """Fallback regex-based extraction for critical fields"""
-        preferences = {}
-        
-        for message in messages:
-            if message["role"] == "user":
-                content = message["content"].lower()
-            
-            # Extract bedroom preferences
-            bed_match = re.search(r"(\d+)\s*bed(room)?s?", content)
-            if bed_match:
-                preferences["number_of_bedrooms"] = int(bed_match.group(1))
-            
-            # Extract bathroom preferences
-            bath_match = re.search(r"(\d+)\s*bath(room)?s?", content)
-            if bath_match:
-                preferences["number_of_bathrooms"] = int(bath_match.group(1))
-            
-                # Extract budget preferences
-            budget_patterns = [
-                    r"under\s*(\d+)(?:k|000)?", r"below\s*(\d+)(?:k|000)?", r"max\s*(\d+)(?:k|000)?", 
-                    r"up\s*to\s*(\d+)(?:k|000)?", r"aed\s*(\d+)(?:k|000)?"
-            ]
-            
-            for pattern in budget_patterns:
-                budget_match = re.search(pattern, content)
-                if budget_match:
-                    budget = int(budget_match.group(1))
-                    if "k" in content or "000" in content:
-                        budget *= 1000
-                    preferences["rent_charge"] = {"lte": budget}
-                    break
-            
-        return preferences
+# DynamicPreferenceExtractor removed - using query_processor.py instead
 
 class DynamicAlternativesGenerator:
     """Dynamic LLM-based alternatives generation"""
@@ -499,46 +492,12 @@ class DynamicAlternativesGenerator:
     
     def _generate_alternatives_with_llm(self, preferences: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Generate alternatives using LLM reasoning"""
-        prompt = f"""Generate alternative property search options for a user with these preferences:
-
-CURRENT PREFERENCES: {preferences}
-
-Generate 3-5 alternative search options that could help the user find similar properties.
-Return ONLY a JSON array of alternatives.
-
-Each alternative should have this format:
-{{
-    "type": "location|budget|property_type|amenities|furnishing",
-    "suggestion": "Human-readable suggestion",
-    "filters": {{"field": "value"}},
-    "reasoning": "Why this alternative might work"
-}}
-
-ALTERNATIVE TYPES:
-- "location": Nearby areas, different communities, or adjacent emirates
-- "budget": Flexible budget options (+/- 20%)
-- "property_type": Similar property types (apartment→studio, villa→townhouse)
-- "amenities": Relaxed amenity requirements
-- "furnishing": Different furnishing options
-
-RULES:
-- Only suggest alternatives that make sense for UAE properties
-- For location: suggest nearby communities or adjacent emirates
-- For budget: suggest ±20% flexibility
-- For property type: suggest similar but different types
-- Be practical and realistic
-- Focus on what would actually help find more properties
-
-Output JSON array:"""
+        prompt = ALTERNATIVES_GENERATION_TEMPLATE.format(preferences=preferences)
 
         try:
             response = self.llm_client.generate(prompt).strip()
-            
-            # Extract JSON array from response
-            json_match = re.search(r'\[.*\]', response, re.DOTALL)
-            if json_match:
-                alternatives = json.loads(json_match.group(0))
-                return alternatives if isinstance(alternatives, list) else []
+            alternatives = _extract_json_from_response(response, "array")
+            return alternatives if isinstance(alternatives, list) else []
         except Exception as e:
             self.llm_client._logger.warning(f"LLM alternatives generation failed: {e}")
         
@@ -551,12 +510,18 @@ Output JSON array:"""
             suggestion = alternative.get("suggestion", "")
             
             # Test if properties exist for this alternative
-            test_chunks = retriever.retrieve(suggestion, filters=filters, top_k=1)
+            test_chunks = retriever.retrieve(suggestion, filters=filters, top_k=10)
             
-            if test_chunks and len(test_chunks) > 0:
-                # Get count for the alternative
-                count_chunks = retriever.retrieve(suggestion, filters=filters, top_k=10)
-                alternative["count"] = f"{len(count_chunks)}+"
+            if test_chunks and len(test_chunks) >= 3:
+                # Must have at least 3 properties to be viable
+                alternative["count"] = f"{len(test_chunks)}+"
+                alternative["sample_properties"] = [
+                    {
+                        "title": chunk.metadata.get("property_title", "Unknown"),
+                        "rent": chunk.metadata.get("rent_charge", "N/A")
+                    }
+                    for chunk in test_chunks[:2]
+                ]
                 return True
             
         except Exception as e:
@@ -572,72 +537,34 @@ class DynamicResponseGenerator:
     
     def generate_greeting_response(self, user_input: str, conversation_history: List[Dict[str, str]]) -> str:
         """Generate dynamic greeting responses"""
-        prompt = f"""Generate a warm, friendly greeting response for a UAE property leasing assistant.
-
-USER GREETING: "{user_input}"
-CONVERSATION HISTORY: {len(conversation_history)} messages
-
-Generate a natural, engaging greeting response that:
-- Welcomes the user warmly
-- Introduces yourself as LeaseOasis, a UAE property assistant
-- Asks an engaging follow-up question about their property search
-- Sounds human and conversational
-- Keeps it brief but inviting
-
-EXAMPLES OF GOOD FOLLOW-UP QUESTIONS:
-- "Which UAE city are you interested in?"
-- "What brings you here today?"
-- "Are you looking for your first property or moving to a new area?"
-- "What type of property are you considering?"
-
-Return ONLY the greeting response, no additional text."""
-
-        try:
-            response = self.llm_client.generate(prompt).strip()
-            return response if response else self._fallback_greeting()
-        except Exception:
-            return self._fallback_greeting()
+        prompt = GREETING_RESPONSE_TEMPLATE.format(
+            user_input=user_input,
+            conversation_count=len(conversation_history)
+        )
+        
+        return _safe_llm_generate_with_fallback(
+            self.llm_client, 
+            prompt, 
+            self._fallback_greeting()
+        )
     
     def _fallback_greeting(self) -> str:
         """Fallback greeting if LLM fails"""
-        greetings = [
-            "Hello! I'm LeaseOasis, your friendly UAE property assistant. I'm here to help you find the perfect property to lease in the UAE. Which city are you interested in — Dubai, Abu Dhabi, or somewhere else?",
-            "Hi there! Welcome to LeaseOasis! I specialize in helping people find great properties to lease in the UAE. What brings you here today?",
-            "Hey! Great to meet you! I'm LeaseOasis, your UAE property leasing assistant. What type of property are you looking for?"
-        ]
-        return greetings[0]  # Return first greeting as fallback
+        return FALLBACK_GREETINGS[0]  # Return first greeting as fallback
     
     def generate_general_knowledge_response(self, user_input: str, conversation_history: List[Dict[str, str]]) -> str:
         """Generate dynamic general knowledge responses"""
-        prompt = f"""Generate a helpful response about property knowledge for a UAE property leasing assistant.
-
-USER QUESTION: "{user_input}"
-
-Generate a response that:
-- Answers the question clearly and helpfully
-- Uses simple, easy-to-understand language
-- Relates to UAE property context when relevant
-- Guides the user back to property search
-- Keeps it concise but informative
-
-If the question is about property terms, provide a clear definition.
-If the question is unrelated to properties, politely redirect to property-related topics.
-
-Return ONLY the response, no additional text."""
-
-        try:
-            response = self.llm_client.generate(prompt).strip()
-            return response if response else self._fallback_general_response()
-        except Exception:
-            return self._fallback_general_response()
+        prompt = GENERAL_KNOWLEDGE_TEMPLATE.format(user_input=user_input)
+        
+        return _safe_llm_generate_with_fallback(
+            self.llm_client, 
+            prompt, 
+            self._fallback_general_response()
+        )
     
     def _fallback_general_response(self) -> str:
         """Fallback response if LLM fails"""
-        return (
-            "I'd be happy to explain that! However, I'm specifically designed to help you find properties to lease in the UAE. "
-            "If you have questions about property types, leasing terms, or UAE-specific property information, I can help with that. "
-            "Would you like to search for properties instead?"
-        )
+        return FALLBACK_GENERAL_RESPONSE
 
 
 class LLMClient(BaseLLM):
@@ -653,7 +580,9 @@ class LLMClient(BaseLLM):
         
         # Initialize dynamic components
         self.query_classifier = DynamicQueryClassifier(self._provider_client)
-        self.preference_extractor = DynamicPreferenceExtractor(self._provider_client)
+        
+        # Initialize metrics for requirement gathering
+        self.requirement_metrics = RequirementGatheringMetrics()
 
         # Set consolidated system instructions
         self.conversation.add_message("system", COMPLETE_SYSTEM_PROMPT)
@@ -726,13 +655,20 @@ class LLMClient(BaseLLM):
                 # Show properties for the first alternative
                 alt = verified_alternatives[0]
                 try:
+                    # Check if this is a "best property" query and add proper boosting filters
+                    filters = alt['filters'].copy()
+                    if "best" in last_assistant_message.lower():
+                        # Apply best property prioritization filters
+                        filters["bnb_verification_status"] = "verified"
+                        filters["premiumBoostingStatus"] = "Active"
+                    
                     alt_chunks = pipeline_state.retriever_client.retrieve(
                         f"properties {alt['suggestion']}", 
-                        filters=alt['filters'], 
+                        filters=filters, 
                         top_k=5
                     )
                     if alt_chunks:
-                        context_prompt = self._build_context_prompt(f"Show me {alt['suggestion']}", alt_chunks)
+                        context_prompt = self._build_context_and_prompt(f"Show me {alt['suggestion']}", alt_chunks)
                         response = self._safe_generate([{"role": "user", "content": context_prompt}])
                         self._add_conversation_messages(user_input, response)
                         return response
@@ -769,7 +705,7 @@ class LLMClient(BaseLLM):
     def _handle_outside_uae_query(self, user_input: str) -> str:
         """Handle queries about properties outside UAE"""
         response = (
-            "I'm sorry, but I can only assist with properties in the UAE. I specialize in helping you find great leasing options in Dubai, Abu Dhabi, Sharjah, and other UAE cities. "
+            f"I'm sorry, but I can only assist with properties in the UAE. I specialize in helping you find great leasing options in Dubai, Abu Dhabi, Sharjah, and other UAE cities. "
             "Would you like to explore properties in any of these UAE locations instead?"
         )
         self._add_conversation_messages(user_input, response)
@@ -803,23 +739,41 @@ class LLMClient(BaseLLM):
         return response
 
     def _handle_average_price_query(self, user_input: str, retrieved_chunks: Optional[List[RetrievedChunk]] = None) -> str:
-        """Handle 'average price' queries"""
+        """Handle 'average price' queries with actual calculation"""
         if retrieved_chunks:
-            context_prompt = self._build_context_and_prompt(user_input, retrieved_chunks)
-            response = self._safe_generate([{"role": "user", "content": context_prompt}])
+            avg_price = self._calculate_average_price(retrieved_chunks)
+            if avg_price:
+                response = f"The average rent for properties matching your criteria is AED {avg_price:,.0f} per year, based on {len(retrieved_chunks)} properties."
+            else:
+                response = "I couldn't calculate the average price from the available data."
         else:
             response = (
                 "I don't have enough data to calculate the average price for your query. "
                 "Could you please specify the location and property type you're interested in?"
             )
 
+        # Don't show individual properties for average queries
         self._add_conversation_messages(user_input, response)
         return response
 
+    def _calculate_average_price(self, chunks: List[RetrievedChunk], field: str = "rent_charge") -> Optional[float]:
+        """Calculate average price from retrieved chunks"""
+        prices = []
+        for chunk in chunks:
+            price = chunk.metadata.get(field)
+            if price and isinstance(price, (int, float)):
+                prices.append(float(price))
+        
+        if prices:
+            return sum(prices) / len(prices)
+        return None
+
     def _handle_property_query(self, user_input: str, retrieved_chunks: Optional[List[RetrievedChunk]] = None) -> str:
-        """Handle property search queries using dynamic preference extraction"""
-        # Extract user preferences using dynamic LLM-based extraction
-        preferences = self.preference_extractor.extract_preferences_from_conversation(self.conversation.get_messages())
+        """Handle property search queries using query_processor for preference extraction"""
+        # Import locally to avoid circular import
+        from .query_processor import extract_filters_with_llm_context_aware
+        # Extract user preferences using the comprehensive query_processor
+        preferences = extract_filters_with_llm_context_aware(user_input, self)
         self.conversation.update_preferences(preferences)
 
         if retrieved_chunks:
@@ -835,7 +789,7 @@ class LLMClient(BaseLLM):
     def _handle_general_query(self, user_input: str) -> str:
         """Handle general queries"""
         response = (
-            "I'm here to help you find properties to lease in the UAE. I can assist with searching for apartments, villas, and other properties in Dubai, Abu Dhabi, and other UAE cities. "
+            f"I'm here to help you find properties to lease in the UAE. I can assist with searching for apartments, villas, and other properties in Dubai, Abu Dhabi, and other UAE cities. "
             "What type of property are you looking for, or would you like me to help you with something specific?"
         )
         self._add_conversation_messages(user_input, response)
@@ -980,7 +934,7 @@ class LLMClient(BaseLLM):
             return self._send_requirements_to_endpoint(requirement_summary)
     
     def _send_requirements_to_endpoint(self, requirements: Dict[str, Any]) -> str:
-        """Send requirements to the backend endpoint"""
+        """Send requirements to the backend endpoint with retry logic and fallback storage"""
         
         endpoint = self._config.requirement_gathering.endpoint or "http://localhost:5000/backend/api/v1/user/requirement"
         
@@ -996,42 +950,110 @@ class LLMClient(BaseLLM):
             "alternatives_suggested": self._get_alternatives_summary()
         }
         
-        try:
-            self._logger.info(f"Sending requirements to endpoint: {endpoint}")
-            response = requests.post(
-                endpoint,
-                json=enhanced_requirements,
-                timeout=15,
-                headers={"Content-Type": "application/json"}
-            )
-            
-            if response.status_code == 200:
-                self.conversation.set_requirement_gathered(True)
-                self._logger.info("Requirements successfully sent to endpoint")
-                return (
-                    "✅ Perfect! I've saved your requirements and sent them to our team.\n\n"
-                    "Our property specialists will:\n"
-                    "• Work with local agencies to find matching properties\n"
-                    "• Add new listings that meet your criteria\n"
-                    "• Notify you when suitable properties become available\n\n"
-                    "This helps us understand what users are looking for and improve our platform. "
-                    "Is there anything else I can help you with today?"
-                )
-            else:
-                self._logger.warning(f"Endpoint returned status {response.status_code}")
-                return (
-                    "I've noted your requirements, but there was a technical issue saving them to our system. "
-                    "Don't worry - I can still help you search for properties or try again later. "
-                    "Would you like to continue exploring available options?"
+        # Add retry logic with exponential backoff
+        retry_attempts = 3
+        retry_delay = 2
+        
+        for attempt in range(retry_attempts):
+            try:
+                self._logger.info(f"Sending requirements to endpoint: {endpoint} (attempt {attempt + 1}/{retry_attempts})")
+                response = requests.post(
+                    endpoint,
+                    json=enhanced_requirements,
+                    timeout=15,
+                    headers={"Content-Type": "application/json"}
                 )
                 
+                if response.status_code == 200:
+                    self.conversation.set_requirement_gathered(True)
+                    self.requirement_metrics.log_attempt(True)
+                    self._logger.info("Requirements successfully sent to endpoint")
+                    return (
+                        "✅ Perfect! I've saved your requirements and sent them to our team.\n\n"
+                        "Our property specialists will:\n"
+                        "• Work with local agencies to find matching properties\n"
+                        "• Add new listings that meet your criteria\n"
+                        "• Notify you when suitable properties become available\n\n"
+                        "This helps us understand what users are looking for and improve our platform. "
+                        "Is there anything else I can help you with today?"
+                    )
+                elif attempt < retry_attempts - 1:
+                    self._logger.warning(f"Endpoint returned status {response.status_code}, retrying in {retry_delay}s")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+                    continue
+                else:
+                    self._logger.warning(f"Endpoint returned status {response.status_code} after {retry_attempts} attempts")
+                    # Save to fallback storage on final failure
+                    self._save_to_fallback_storage(enhanced_requirements)
+                    self.requirement_metrics.log_attempt(False)
+                    return (
+                        "I've noted your requirements, but there was a technical issue saving them to our system. "
+                        "Don't worry - I can still help you search for properties or try again later. "
+                        "Would you like to continue exploring available options?"
+                    )
+                    
+            except requests.exceptions.Timeout:
+                if attempt < retry_attempts - 1:
+                    self._logger.warning(f"Request timeout, retrying in {retry_delay}s")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                    continue
+                else:
+                    self._logger.error("Request timeout after all retry attempts")
+                    self._save_to_fallback_storage(enhanced_requirements)
+                    self.requirement_metrics.log_attempt(False)
+                    return (
+                        "I've carefully noted your requirements! While there was a technical issue with our system, "
+                        "I can still help you search for properties with different criteria. "
+                        "Would you like to try some alternative searches?"
+                    )
+            except Exception as e:
+                if attempt < retry_attempts - 1:
+                    self._logger.warning(f"Request failed: {e}, retrying in {retry_delay}s")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                    continue
+                else:
+                    self._logger.error(f"Failed to send requirements to endpoint after {retry_attempts} attempts: {e}")
+                    self._save_to_fallback_storage(enhanced_requirements)
+                    self.requirement_metrics.log_attempt(False)
+                    return (
+                        "I've carefully noted your requirements! While there was a technical issue with our system, "
+                        "I can still help you search for properties with different criteria. "
+                        "Would you like to try some alternative searches?"
+                    )
+        
+        # This should never be reached, but just in case
+        return (
+            "I've carefully noted your requirements! While there was a technical issue with our system, "
+            "I can still help you search for properties with different criteria. "
+            "Would you like to try some alternative searches?"
+        )
+
+    def _save_to_fallback_storage(self, requirements: Dict[str, Any]) -> None:
+        """Save requirements to fallback storage when endpoint fails"""
+        try:
+            # For now, just log the requirements - in production, you might save to a file or database
+            fallback_data = {
+                "timestamp": time.time(),
+                "session_id": requirements.get("session_id", ""),
+                "user_query": requirements.get("user_query", ""),
+                "preferences": requirements.get("preferences", {}),
+                "conversation_summary": requirements.get("conversation_summary", ""),
+                "fallback_reason": "endpoint_failure"
+            }
+            
+            self._logger.info(f"Saved requirements to fallback storage: {fallback_data}")
+            
+            # In a production environment, you might want to:
+            # 1. Save to a local file
+            # 2. Save to a database table
+            # 3. Send to a queue for later processing
+            # 4. Send to an alternative endpoint
+            
         except Exception as e:
-            self._logger.error(f"Failed to send requirements to endpoint: {e}")
-            return (
-                "I've carefully noted your requirements! While there was a technical issue with our system, "
-                "I can still help you search for properties with different criteria. "
-                "Would you like to try some alternative searches?"
-            )
+            self._logger.error(f"Failed to save to fallback storage: {e}")
 
     def generate(self, prompt: str) -> str:
         """Fallback for BaseLLM compatibility."""

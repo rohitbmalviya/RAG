@@ -351,7 +351,6 @@ def _build_context_section(conversation_context: str, user_preferences: Dict[str
     
     return ""
 
-
 def _build_dynamic_extraction_prompt(conversation_context: str, user_preferences: Dict[str, Any], 
                                    settings, query: str) -> str:
     """

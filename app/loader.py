@@ -78,6 +78,10 @@ def _compose_text(row: Dict[str, object], columns: List[str]) -> str:
             if property_type_name:
                 segments.append(f"Property Type: {property_type_name}")
                 continue
+        # Ensure property_type_name is always included when available
+        elif col == "property_type_name" and value_str:
+            segments.append(f"Property Type Name: {value_str}")
+            continue
         elif col == "rent_type_id":
             rent_type_name = row.get("rent_type_name")
             if rent_type_name:

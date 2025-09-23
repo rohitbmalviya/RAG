@@ -43,76 +43,149 @@ def _stringify_value(raw: Optional[object]) -> str:
 def _compose_text(row: Dict[str, object], columns: List[str]) -> str:
     """
     Dynamically compose a text representation of a row based on configured columns.
-    Instead of hardcoding, it uses whatever columns are listed in config.yml.
+    Optimized for semantic search with natural language descriptions.
     """
     segments: List[str] = []
     amenities: List[str] = []
     
+    # Start with property title for better semantic matching
+    property_title = row.get("property_title")
+    if property_title:
+        segments.append(f"Property: {property_title}")
     
+    # Property type and rent type for context
     property_type_name = row.get("property_type_name")
     if property_type_name:
-        segments.append(f"Property Type: {property_type_name}")
-    
+        segments.append(f"This is a {property_type_name.lower()}")
     
     rent_type_name = row.get("rent_type_name")
     if rent_type_name:
-        segments.append(f"Rent Type: {rent_type_name}")
+        segments.append(f"Rent type: {rent_type_name}")
     
-    for col in columns:
+    # Location information for better searchability
+    location_parts = []
+    if row.get("emirate"):
+        location_parts.append(row.get("emirate"))
+    if row.get("city"):
+        location_parts.append(row.get("city"))
+    if row.get("community"):
+        location_parts.append(row.get("community"))
+    if row.get("subcommunity"):
+        location_parts.append(row.get("subcommunity"))
+    
+    if location_parts:
+        segments.append(f"Located in: {', '.join(location_parts)}")
+    
+    # Building and developer information
+    building_name = row.get("building_name")
+    if building_name:
+        segments.append(f"Building: {building_name}")
+    
+    developer_name = row.get("developer_name")
+    if developer_name:
+        segments.append(f"Developed by: {developer_name}")
+    
+    # Property specifications
+    bedrooms = row.get("number_of_bedrooms")
+    bathrooms = row.get("number_of_bathrooms")
+    if bedrooms or bathrooms:
+        spec_parts = []
+        if bedrooms:
+            spec_parts.append(f"{bedrooms} bedroom{'s' if bedrooms != 1 else ''}")
+        if bathrooms:
+            spec_parts.append(f"{bathrooms} bathroom{'s' if bathrooms != 1 else ''}")
+        segments.append(f"Property features: {', '.join(spec_parts)}")
+    
+    property_size = row.get("property_size")
+    if property_size:
+        segments.append(f"Size: {property_size} square feet")
+    
+    # Financial information
+    rent_charge = row.get("rent_charge")
+    if rent_charge:
+        segments.append(f"Annual rent: AED {rent_charge:,}")
+    
+    security_deposit = row.get("security_deposit")
+    if security_deposit:
+        segments.append(f"Security deposit: AED {security_deposit:,}")
+    
+    # Furnishing status
+    furnishing_status = row.get("furnishing_status")
+    if furnishing_status:
+        segments.append(f"Furnishing: {furnishing_status.replace('_', ' ').title()}")
+    
+    # Year built
+    year_built = row.get("year_built")
+    if year_built:
+        segments.append(f"Built in: {year_built}")
+    
+    # Floor level
+    floor_level = row.get("floor_level")
+    if floor_level:
+        segments.append(f"Floor: {floor_level}")
+    
+    # Nearby landmarks for location context
+    nearby_landmarks = row.get("nearby_landmarks")
+    if nearby_landmarks:
+        segments.append(f"Nearby landmarks: {nearby_landmarks}")
+    
+    # Process amenities
+    for col in {
+        "maids_room", "security_available", "concierge_available", "central_ac_heating",
+        "elevators", "balcony_terrace", "storage_room", "laundry_room", "gym_fitness_center",
+        "childrens_play_area", "bbq_area", "pet_friendly", "smart_home_features",
+        "beach_access", "jogging_cycling_tracks", "mosque_nearby", "waste_disposal_system",
+        "power_backup", "chiller_included", "sublease_allowed"
+    }:
         value = row.get(col)
-        if value is None:
-            continue
-        if isinstance(value, (dict, list)):
-            value = _stringify_value(value)
-
-        value_str = str(value).strip()
-        if not value_str:
-            continue
-            
-        
-        if col in {"property_type_id", "rent_type_id", "property_type_name", "rent_type_name"}:
-            continue
-            
-        
-        if col in {
-            "maids_room", "security_available", "concierge_available", "central_ac_heating",
-            "elevators", "balcony_terrace", "storage_room", "laundry_room", "gym_fitness_center",
-            "childrens_play_area", "bbq_area", "pet_friendly", "smart_home_features",
-            "beach_access", "jogging_cycling_tracks", "mosque_nearby", "waste_disposal_system",
-            "power_backup", "chiller_included", "sublease_allowed"
-        }:
-            if value_str.lower() in {"true", "1", "yes"}:
-                amenity_name = col.replace('_', ' ').replace('available', '').replace('  ', ' ').strip()
-                amenities.append(amenity_name.title())
-            continue
-        
-        
-        if col == "rent_charge":
-            segments.append(f"Annual Rent: AED {value_str}")
-        elif col == "security_deposit":
-            segments.append(f"Security Deposit: AED {value_str}")
-        elif col == "maintenance_charge":
-            segments.append(f"Maintenance Charge: AED {value_str}")
-        elif col == "property_size":
-            segments.append(f"Property Size: {value_str} sq.ft.")
-        elif col == "year_built":
-            segments.append(f"Year Built: {value_str}")
-        elif col == "lease_duration":
-            segments.append(f"Lease Duration: {value_str}")
-        elif col == "available_from":
-            segments.append(f"Available From: {value_str}")
-        elif col == "developer_name":
-            segments.append(f"Developer: {value_str}")
-        elif col in {"parking", "swimming_pool", "public_transport_type", "retail_shopping_access"}:
-            
-            if value_str and value_str != "null":
-                segments.append(f"{col.replace('_', ' ').title()}: {value_str}")
-        else:
-            segments.append(f"{col.replace('_', ' ').title()}: {value_str}")
+        if value and str(value).lower() in {"true", "1", "yes"}:
+            amenity_name = col.replace('_', ' ').replace('available', '').replace('  ', ' ').strip()
+            amenities.append(amenity_name.title())
     
+    # Special amenities with more detail
+    parking = row.get("parking")
+    if parking and str(parking) != "null":
+        segments.append(f"Parking: {_stringify_value(parking)}")
     
+    swimming_pool = row.get("swimming_pool")
+    if swimming_pool and str(swimming_pool) != "null":
+        segments.append(f"Swimming pool: {_stringify_value(swimming_pool)}")
+    
+    # Public transport and retail access
+    public_transport = row.get("public_transport_type")
+    if public_transport and str(public_transport) != "null":
+        segments.append(f"Public transport: {_stringify_value(public_transport)}")
+    
+    retail_access = row.get("retail_shopping_access")
+    if retail_access and str(retail_access) != "null":
+        segments.append(f"Shopping access: {_stringify_value(retail_access)}")
+    
+    # Availability
+    available_from = row.get("available_from")
+    if available_from:
+        segments.append(f"Available from: {available_from}")
+    
+    # Lease duration
+    lease_duration = row.get("lease_duration")
+    if lease_duration:
+        segments.append(f"Lease duration: {lease_duration}")
+    
+    # Boosting and verification status for "best property" queries
+    bnb_verification_status = row.get("bnb_verification_status")
+    if bnb_verification_status and bnb_verification_status != "notrequired":
+        segments.append(f"Verification status: {bnb_verification_status}")
+    
+    premium_boosting = row.get("premiumBoostingStatus")
+    if premium_boosting and premium_boosting == "Active":
+        segments.append("Premium boosted property")
+    
+    carousel_boosting = row.get("carouselBoostingStatus")
+    if carousel_boosting and carousel_boosting == "Active":
+        segments.append("Prime featured property")
+    
+    # Add amenities section
     if amenities:
-        segments.append(f"Amenities: {', '.join(amenities)}")
+        segments.append(f"Amenities include: {', '.join(amenities)}")
     
     return "\n".join(segments)
 
@@ -308,6 +381,8 @@ def _build_sql_query(table: str, quoted_id_col: str, quoted_cols: List[str], whe
     for col in [quoted_id_col] + quoted_cols:
         qualified_columns.append(f'p.{col}')
     qualified_select_cols = ", ".join(qualified_columns)
+    
+    # CRITICAL: Only process properties with property_status = 'listed' for RAG
     base_query = f"""
         SELECT {qualified_select_cols},
                pt.name as property_type_name,

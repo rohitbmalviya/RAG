@@ -50,6 +50,15 @@ AVAILABLE FIELDS:
 
 CRITICAL IMPROVEMENTS FOR ACCURACY:
 
+QUERY CATEGORY DETECTION (CRITICAL):
+- "best property" or "best properties" or "top property" → {{"bnb_verification_status": "verified", "premiumBoostingStatus": "Active"}}
+- "premium property" or "premium" → {{"premiumBoostingStatus": "Active"}}
+- "prime property" or "prime" → {{"carouselBoostingStatus": "Active"}}
+- "verified property" or "verified" → {{"bnb_verification_status": "verified"}}
+- "average price" or "average rent" or "typical cost" → NO FILTERS (this is a calculation query)
+- "hi", "hello", "good morning" → NO FILTERS (greeting query)
+- "what is apartment" or "define villa" → NO FILTERS (general knowledge query)
+
 BOOSTING STATUS DETECTION (VERY IMPORTANT):
 - "best property" or "best properties" → {{"bnb_verification_status": "verified", "premiumBoostingStatus": "Active"}}
 - "top property" or "recommended" → {{"bnb_verification_status": "verified", "premiumBoostingStatus": "Active"}}  

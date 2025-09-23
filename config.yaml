@@ -174,13 +174,13 @@ database:
     property_view_id: keyword
 
 chunking:
-  chunk_size: 500 # Increased for better context
-  chunk_overlap: 50 # Increased for better continuity
+  chunk_size: 800 # Optimized for property descriptions with full context
+  chunk_overlap: 100 # Increased overlap for better continuity between chunks
   unit: token
 
 embedding:
   provider: google
-  model: text-embedding-004 # Use latest model
+  model: gemini-embedding-001 # Use specified model
   api_key: ${LLM_MODEL_API_KEY}
   batch_size: 10 # Reduce from 64 to avoid rate limits
 
@@ -193,8 +193,12 @@ vector_db:
   index: rag_properties
   similarity: cosine
   refresh_on_write: false
-  dims: 768 # Correct dimensions for text-embedding-004
+  dims: 3072 # Correct dimensions for gemini-embedding-001
   mapping_properties_key: properties
+  # Elasticsearch 8.17.1 configuration
+  index_settings:
+    number_of_shards: 1
+    number_of_replicas: 0
 
 retrieval:
   top_k: 12 # Increased for better results
@@ -264,7 +268,7 @@ llm:
   provider: google
   model: gemini-2.5-flash-lite
   temperature: 0.2
-  max_output_tokens: 1024
+  max_output_tokens: 2048
 
 ingestion:
   batch_size: 500
@@ -304,10 +308,10 @@ requirement_gathering:
   auto_save_on_conversation_end: true
   ask_user_confirmation: true
   priority_fields:
-    - location
+    - location # address in which the user is looking for a property
     - property_type_name
     - number_of_bedrooms
     - rent_charge
     - furnishing_status
-    - amenities
-    - lease_duration
+    - amenities # optional
+    - lease_duration # optional

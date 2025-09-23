@@ -1,5 +1,6 @@
 from __future__ import annotations
 import os
+import time
 from typing import Any, Dict, List, Optional
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from pydantic import BaseModel
@@ -8,11 +9,12 @@ from .chunking import chunk_documents
 from .config import Settings, get_settings
 from .core.base import BaseEmbedder, BaseVectorStore, BaseLLM
 from .loader import load_documents, load_document_by_id
-from .llm import LLMClient
+from .monitoring import get_metrics_collector, get_error_handler, get_performance_monitor, QueryMetrics
 from .models import RetrievedChunk
 from .retriever import Retriever
 from .utils import get_logger
 from .factories import build_embedder, build_llm, build_vector_store
+from .monitoring import get_metrics_collector, get_error_handler, get_performance_monitor, QueryMetrics
 from fastapi.middleware.cors import CORSMiddleware
 
 # Constants to eliminate duplication
@@ -158,71 +160,131 @@ async def on_startup() -> None:
 
 @app.post("/query", response_model=QueryResponse)
 async def query_endpoint(request: QueryRequest) -> QueryResponse:
-    if not (pipeline_state.retriever_client and pipeline_state.llm_client):
-        raise HTTPException(status_code=500, detail=SERVER_NOT_INITIALIZED)
-    if not request.query or not request.query.strip():
-        raise HTTPException(status_code=400, detail="Query must not be empty")
+    # Initialize monitoring
+    metrics_collector = get_metrics_collector()
+    error_handler = get_error_handler()
+    performance_monitor = get_performance_monitor()
     
-    print(f"\n🚀 QUERY ENDPOINT HIT:")
-    print(f"   Session ID: {request.session_id}")
-    print(f"   Raw Query: '{request.query}'")
-    print(f"   Top K: {request.top_k}")
+    # Start timing the entire query
+    query_id = f"query_{int(time.time() * 1000)}"
+    performance_monitor.start_timer(query_id)
     
-    # FIXED: Use session_id properly
-    session_id = request.session_id or "default"
-    
-    # Create/get session-specific LLM client
-    llm_client = session_manager.get_or_create_session(session_id)
-    print(f"   LLM Client: {type(llm_client).__name__}")
-    
-    # CRITICAL: Use the session LLM client, not pipeline_state.llm_client
-    print(f"\n🔍 PREPROCESSING QUERY:")
-    normalized_query, filters = preprocess_query(request.query, llm_client)
-    print(f"   Normalized Query: '{normalized_query}'")
-    print(f"   Extracted Filters: {filters}")
-    
-    # Store extracted filters in LLM client for context
-    if hasattr(llm_client, '_last_extracted_filters'):
-        llm_client._last_extracted_filters = filters
-    
-    # Retrieve chunks for property queries
-    print(f"\n📚 RETRIEVING CHUNKS:")
-    chunks: List[RetrievedChunk] = pipeline_state.retriever_client.retrieve(
-        normalized_query,
-        filters=filters,
-        top_k=request.top_k,
-    )
-    print(f"   Retrieved {len(chunks)} chunks")
-    
-    # Use session-specific LLM client for chat - LLM determines if sources should be shown
-    print(f"\n🤖 LLM PROCESSING:")
-    answer, should_show_sources = llm_client.chat_with_source_decision(normalized_query, retrieved_chunks=chunks)
-    print(f"   Answer Length: {len(answer)} characters")
-    print(f"   Should Show Sources: {should_show_sources}")
-    
-    # Filter sources based on LLM decision and extracted filters
-    if should_show_sources:
-        filtered_chunks = [c for c in chunks if getattr(c, "score", 1.0) >= 0.7]
+    try:
+        if not (pipeline_state.retriever_client and pipeline_state.llm_client):
+            raise HTTPException(status_code=500, detail=SERVER_NOT_INITIALIZED)
+        if not request.query or not request.query.strip():
+            raise HTTPException(status_code=400, detail="Query must not be empty")
         
-        # Apply additional filtering based on extracted filters
-        if filters:
-            filtered_chunks = _apply_filter_compliance(filtered_chunks, filters)
-            print(f"   Applied filter compliance, remaining chunks: {len(filtered_chunks)}")
+        print(f"\n🚀 QUERY ENDPOINT HIT:")
+        print(f"   Query ID: {query_id}")
+        print(f"   Session ID: {request.session_id}")
+        print(f"   Raw Query: '{request.query}'")
+        print(f"   Top K: {request.top_k}")
         
-        sources: List[SourceItem] = [
-            SourceItem(score=c.score, text=c.text, metadata=c.metadata)
-            for c in filtered_chunks
-        ]
-        print(f"   Final filtered sources: {len(sources)}")
-    else:
-        sources = []
-        print(f"   No sources shown (LLM decision)")
-    
-    print(f"\n✅ RESPONSE READY:")
-    print(f"   Answer: {answer[:100]}...")
-    print(f"   Sources Count: {len(sources)}")
-    
-    return QueryResponse(answer=answer, sources=sources)
+        # FIXED: Use session_id properly
+        session_id = request.session_id or "default"
+        
+        # Create/get session-specific LLM client
+        llm_client = session_manager.get_or_create_session(session_id)
+        print(f"   LLM Client: {type(llm_client).__name__}")
+        
+        # CRITICAL: Use the session LLM client, not pipeline_state.llm_client
+        print(f"\n🔍 PREPROCESSING QUERY:")
+        normalized_query, filters = preprocess_query(request.query, llm_client)
+        print(f"   Normalized Query: '{normalized_query}'")
+        print(f"   Extracted Filters: {filters}")
+        
+        # Store extracted filters in LLM client for context
+        if hasattr(llm_client, '_last_extracted_filters'):
+            llm_client._last_extracted_filters = filters
+        
+        # Retrieve chunks for property queries
+        print(f"\n📚 RETRIEVING CHUNKS:")
+        chunks: List[RetrievedChunk] = pipeline_state.retriever_client.retrieve(
+            normalized_query,
+            filters=filters,
+            top_k=request.top_k,
+        )
+        print(f"   Retrieved {len(chunks)} chunks")
+        
+        # Use session-specific LLM client for chat - LLM determines if sources should be shown
+        print(f"\n🤖 LLM PROCESSING:")
+        answer, should_show_sources = llm_client.chat_with_source_decision(normalized_query, retrieved_chunks=chunks)
+        print(f"   Answer Length: {len(answer)} characters")
+        print(f"   Should Show Sources: {should_show_sources}")
+        
+        # Check if this is a requirement gathering request
+        if "REQUIREMENT_GATHERING_DETECTED" in answer or "gather requirement" in normalized_query.lower() or "save my requirements" in normalized_query.lower():
+            print(f"   📝 REQUIREMENT GATHERING DETECTED IN QUERY!")
+            print(f"   Query: '{normalized_query}'")
+            print(f"   Answer contains requirement gathering: {'REQUIREMENT_GATHERING_DETECTED' in answer}")
+        
+        # Track search attempt for better conversation context
+        llm_client._track_search_attempt(normalized_query, filters, chunks)
+        
+        # Filter sources based on LLM decision and extracted filters
+        if should_show_sources:
+            filtered_chunks = [c for c in chunks if getattr(c, "score", 1.0) >= 0.7]
+            
+            # Apply additional filtering based on extracted filters
+            if filters:
+                filtered_chunks = _apply_filter_compliance(filtered_chunks, filters)
+                print(f"   Applied filter compliance, remaining chunks: {len(filtered_chunks)}")
+            
+            sources: List[SourceItem] = [
+                SourceItem(score=c.score, text=c.text, metadata=c.metadata)
+                for c in filtered_chunks
+            ]
+            print(f"   Final filtered sources: {len(sources)}")
+        else:
+            sources = []
+            print(f"   No sources shown (LLM decision)")
+        
+        # Calculate processing time
+        processing_time_ms = performance_monitor.end_timer(query_id)
+        
+        # Record successful query metrics
+        metrics = QueryMetrics(
+            query_id=query_id,
+            session_id=session_id,
+            query_text=request.query,
+            query_category="property_search",  # Could be enhanced to detect category
+            processing_time_ms=processing_time_ms,
+            chunks_retrieved=len(chunks),
+            chunks_filtered=len(sources),
+            sources_shown=should_show_sources
+        )
+        metrics_collector.record_query(metrics)
+        
+        print(f"\n✅ RESPONSE READY:")
+        print(f"   Answer: {answer[:100]}...")
+        print(f"   Sources Count: {len(sources)}")
+        print(f"   Processing Time: {processing_time_ms:.0f}ms")
+        
+        return QueryResponse(answer=answer, sources=sources)
+        
+    except Exception as e:
+        # Handle errors gracefully
+        processing_time_ms = performance_monitor.end_timer(query_id)
+        
+        # Record error metrics
+        metrics = QueryMetrics(
+            query_id=query_id,
+            session_id=request.session_id or "default",
+            query_text=request.query,
+            query_category="error",
+            processing_time_ms=processing_time_ms,
+            chunks_retrieved=0,
+            chunks_filtered=0,
+            sources_shown=False,
+            error_occurred=True,
+            error_message=str(e)
+        )
+        metrics_collector.record_query(metrics)
+        
+        # Return user-friendly error response
+        error_message = error_handler.handle_query_error(e, request.query, request.session_id or "default")
+        return QueryResponse(answer=error_message, sources=[])
 
 def _validate_components() -> None:
     """Validate that all required components are initialized"""

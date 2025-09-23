@@ -81,7 +81,7 @@ class VectorStoreClient(BaseVectorStore):
                 "type": "dense_vector",
                 "dims": dims,
                 "index": True,
-                "similarity": self._config.similarity,
+                "similarity": self._config.similarity
             },
             "metadata": {"type": "object", "enabled": True},
         }

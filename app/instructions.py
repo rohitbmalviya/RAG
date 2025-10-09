@@ -928,3 +928,179 @@ If all essential information is present, return:
 #
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 12: REQUIREMENT GATHERING - REQUEST NAME GENERATION
+# Purpose: LLM generates concise request title from property requirements
+# Usage: Used by _generate_request_name() function
+# ═══════════════════════════════════════════════════════════════════════════════
+
+REQUEST_NAME_GENERATION_TEMPLATE = """
+You are creating a concise, descriptive title for a property requirement request.
+
+PROPERTY REQUIREMENTS:
+{requirements}
+
+Create a short, clear title (5-10 words) that summarizes the main requirements.
+
+Focus on the most important details:
+- Number of bedrooms (if specified)
+- Property type (apartment/villa/studio)
+- Location (area/emirate)
+- Key feature (budget/furnished/etc.)
+
+Examples of good titles:
+- "2 BHK Furnished Apartment in Dubai Marina"
+- "3 Bedroom Villa in Arabian Ranches under 200K"
+- "Studio in Business Bay with Pool and Gym"
+- "4 BHK Penthouse in Downtown Dubai"
+
+Return JSON only (no additional text):
+{{
+  "request_name": "Your generated title here"
+}}
+"""
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 13: REQUIREMENT GATHERING - PLAIN TEXT DESCRIPTION
+# Purpose: LLM generates plain text description of ALL requirements from conversation
+# Usage: Used by _generate_plain_text_description() function
+# ═══════════════════════════════════════════════════════════════════════════════
+
+PLAIN_TEXT_DESCRIPTION_TEMPLATE = """
+You are creating a professional plain text description of property requirements.
+
+EXTRACTED PROPERTY REQUIREMENTS:
+{requirements}
+
+TASK:
+Generate a SINGLE PARAGRAPH that summarizes ALL property requirements in a flowing narrative format.
+
+FORMAT RULES:
+- Write as ONE natural paragraph (2-3 sentences max)
+- NO bullet points
+- NO lists  
+- NO sections or headers
+- NO "Property Requirements:" label
+- NO "Conversation Context:" section
+- Just flowing narrative text
+- Include ALL requirements mentioned
+
+EXAMPLE CORRECT OUTPUT:
+"Requirement gathering for a furnished 2-bedroom apartment in Dubai Downtown with a budget under 150,000 AED annually and a lease of at least 5 years. Key highlights include access to a pool, gym, and one parking spot."
+
+EXAMPLE WRONG OUTPUT:
+"Property Requirements:
+- Location: Dubai
+- Type: Apartment...
+
+Conversation Context:
+User said..."
+
+DO NOT:
+- Don't use bullet points or lists
+- Don't use "Property Requirements:" header
+- Don't write conversation history
+- Don't use key-value format
+- Don't add extra sections
+
+DO:
+- Write ONE flowing paragraph
+- Include all requirements naturally
+- Use professional language
+- Be concise but complete
+
+Generate ONLY the single narrative paragraph now:
+"""
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 14: REQUIREMENT GATHERING - CONTACT INFORMATION EXTRACTION
+# Purpose: Extract operator name and contact info from user message
+# Usage: Used by _extract_contact_info_from_message() function
+# ═══════════════════════════════════════════════════════════════════════════════
+
+CONTACT_INFO_EXTRACTION_TEMPLATE = """
+Extract the operator name and contact information from this user message.
+
+USER MESSAGE:
+{user_message}
+
+Look for:
+- Name: Person's full name
+- Phone: Any phone number format (+971-xx, 050-xxx, etc.)
+- Email: Email address
+- Any other contact details
+
+Return JSON only:
+{{
+  "operator_name": "Full name if found, else null",
+  "contact_info": "Phone and/or email combined, else null"
+}}
+
+Examples:
+
+Input: "Name: John Doe, Contact: +971-50-123-4567, john@email.com"
+Output: {{"operator_name": "John Doe", "contact_info": "+971-50-123-4567, john@email.com"}}
+
+Input: "My name is Sarah Ahmed, you can reach me at 050-xxx-xxxx"
+Output: {{"operator_name": "Sarah Ahmed", "contact_info": "050-xxx-xxxx"}}
+
+Input: "I'm Mohammed, email: mo@example.com, phone 0501234567"
+Output: {{"operator_name": "Mohammed", "contact_info": "mo@example.com, 0501234567"}}
+
+Input: "Just call me on 050-999-8888"
+Output: {{"operator_name": null, "contact_info": "050-999-8888"}}
+"""
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 17. INTERACTIVE REQUIREMENT GATHERING (FRIENDLY & PROFESSIONAL)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+INTERACTIVE_REQUIREMENT_QUESTION_TEMPLATE = """
+You are a friendly, professional assistant helping users find what they need.
+
+CURRENT INFORMATION WE HAVE:
+{current_requirements_summary}
+
+MISSING INFORMATION WE NEED:
+{missing_fields_list}
+
+TASK:
+Generate a warm, friendly, professional question to ask the user for the missing information.
+
+TONE GUIDELINES:
+- Be conversational and natural (like a human would speak)
+- Be warm and enthusiastic
+- Be professional (no slang, proper grammar)
+- Show you understand their needs
+- Make them feel valued
+
+STRUCTURE GUIDELINES:
+1. Acknowledge what you have (brief, 1 sentence)
+2. Ask for missing info naturally (conversational, not field names)
+3. Keep it SHORT (2-3 sentences total)
+4. Ask for 1-3 most important fields (don't overwhelm)
+5. Use friendly language ("Great!", "Perfect!", "Wonderful!")
+
+EXAMPLES OF GOOD QUESTIONS:
+
+Example 1:
+"Perfect! I have your location and budget sorted. Now, to narrow it down - what type of property are you looking for? Like an apartment, villa, or townhouse? And how many bedrooms do you need?"
+
+Example 2:
+"Great! So you're looking in Dubai with a 150K budget. Excellent! Just need a couple more details: would you prefer furnished or unfurnished? And any specific amenities you'd like, such as gym, pool, or parking?"
+
+Example 3:
+"Wonderful! I have the basics covered. Quick question - how long are you planning to stay? And what's your ideal move-in date?"
+
+DO NOT:
+- Don't use field names like "property_type_name" or "rent_charge"
+- Don't use numbered lists or bullet points  
+- Don't sound robotic or formal like a form
+- Don't ask for more than 3 things at once
+- Don't be cold or transactional
+
+NOW GENERATE YOUR FRIENDLY QUESTION (2-3 sentences, conversational, warm):
+"""
+
+# ═══════════════════════════════════════════════════════════════════════════════
+

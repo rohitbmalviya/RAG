@@ -282,7 +282,7 @@ def _build_dynamic_extraction_prompt(conversation_context: str, user_preferences
             logger.debug(f" Context section added: {len(context_section)} characters")
             return final_prompt
         else:
-            logger.warning(f" Warning: Could not find 'User query:' in prompt")
+            logger.debug(f" Warning: Could not find 'User query:' in prompt")
     logger.debug(f" No context section added")
     return base_instructions
 

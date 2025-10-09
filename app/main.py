@@ -296,7 +296,7 @@ class SessionManager:
         for sid in expired:
             del self.sessions[sid]
             del self.last_activity[sid]
-            logger.info(f"Cleaned up expired session: {sid}")
+            logger.debug(f"Cleaned up expired session: {sid}")
 
 # Replace global conversation_sessions with:
 session_manager = SessionManager(ttl_minutes=30)
@@ -308,7 +308,7 @@ def initialize_components() -> None:
         logger.error("database.columns must be configured in config.yaml")
         raise RuntimeError("database.columns must be configured")
     if settings.retrieval.filter_fields is None:
-        logger.warning("retrieval.filter_fields is None; treating as empty list")
+        logger.debug("retrieval.filter_fields is None; treating as empty list")
         settings.retrieval.filter_fields = []  
     try:
         embedder = build_embedder(settings.embedding, api_key=settings.embedding.api_key)
@@ -346,7 +346,7 @@ async def on_startup() -> None:
             pipeline_state.vector_store_client.ensure_index(dims)  
             pipeline_state.index_ready = True
         except Exception as exc:
-            logger.warning("Failed eager index init: %s", exc)
+            logger.debug("Failed eager index init: %s", exc)
 
 @app.post(
     "/query",
@@ -483,7 +483,7 @@ async def query_endpoint(request: QueryRequest, http_request: Request) -> QueryR
     # Rate limiting check
     client_ip = http_request.client.host if http_request.client else "unknown"
     if not rate_limiter.is_allowed(client_ip):
-        logger.warning(f"Rate limit exceeded for IP: {client_ip}")
+        logger.debug(f"Rate limit exceeded for IP: {client_ip}")
         raise HTTPException(
             status_code=429,
             detail="Rate limit exceeded. Maximum 60 requests per minute. Please try again later."
@@ -505,10 +505,10 @@ async def query_endpoint(request: QueryRequest, http_request: Request) -> QueryR
             raise HTTPException(status_code=500, detail=SERVER_NOT_INITIALIZED)
         
         if not request.query or not request.query.strip():
-            logger.warning(f"Empty query received from session {request.session_id}")
+            logger.debug(f"Empty query received from session {request.session_id}")
             raise HTTPException(status_code=400, detail="Query must not be empty")
         
-        logger.info(f"Processing query: {request.query[:100]} | Session: {request.session_id} | Query ID: {query_id}")
+        logger.debug(f"Processing query: {request.query[:100]} | Session: {request.session_id} | Query ID: {query_id}")
         
         logger.debug(f"\n QUERY ENDPOINT HIT:")
         logger.debug(f"   Query ID: {query_id}")
@@ -558,7 +558,7 @@ async def query_endpoint(request: QueryRequest, http_request: Request) -> QueryR
             logger.error(f"Retrieval failed: {exc}")
             # Continue with empty chunks - LLM will handle no results case
             chunks = []
-            logger.warning("Continuing with empty chunks due to retrieval failure")
+            logger.debug("Continuing with empty chunks due to retrieval failure")
         
         # Use session-specific LLM client for chat - LLM determines if sources should be shown
         logger.debug(f"\n LLM PROCESSING:")
@@ -802,7 +802,7 @@ def _prepare_index(rebuild_index: bool = False) -> None:
     try:
         dims = _get_vector_dimensions()
         if rebuild_index:
-            logger.info("Rebuilding index '%s'", pipeline_state.vector_store_client._config.index)
+            logger.debug("Rebuilding index '%s'", pipeline_state.vector_store_client._config.index)
             pipeline_state.vector_store_client.delete_index()
         pipeline_state.vector_store_client.ensure_index(dims)
         pipeline_state.index_ready = True
@@ -819,12 +819,12 @@ def _run_ingestion(batch_size: int, rebuild_index: bool) -> None:
     total_indexed = 0
     total_errors = 0
     for docs_batch in load_documents(settings, batch_size=batch_size):
-        logger.info("Fetched %s rows from DB", len(docs_batch))
+        logger.debug("Fetched %s rows from DB", len(docs_batch))
         chunks, embeddings = _process_documents_to_vectors(docs_batch, settings)
         if not chunks:
             continue
-        logger.info("Created %s chunks", len(chunks))
-        logger.info("Generated %s embeddings", len(embeddings))
+        logger.debug("Created %s chunks", len(chunks))
+        logger.debug("Generated %s embeddings", len(embeddings))
         success, errors = _upsert_chunks_to_vector_store(chunks, embeddings)
         if success > 0 and not pipeline_state.index_ready:
             pipeline_state.index_ready = True
@@ -832,8 +832,8 @@ def _run_ingestion(batch_size: int, rebuild_index: bool) -> None:
         total_chunks += len(chunks)
         total_indexed += success
         total_errors += int(errors)
-        logger.info("Upserted %s chunks (errors=%s)", success, errors)
-        logger.info("Ingested totals rows=%s chunks=%s indexed=%s errors=%s", total_rows, total_chunks, total_indexed, total_errors)
+        logger.debug("Upserted %s chunks (errors=%s)", success, errors)
+        logger.debug("Ingested totals rows=%s chunks=%s indexed=%s errors=%s", total_rows, total_chunks, total_indexed, total_errors)
 
 @app.post(
     "/ingest",

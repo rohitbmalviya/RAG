@@ -264,12 +264,16 @@ class LoggingConfig(BaseModel):
     level: Optional[str] = None
 
 class RequirementGatheringConfig(BaseModel):
-    """Configuration for requirement gathering feature (optional)."""
+    """Configuration for requirement gathering feature (NEW API FORMAT)."""
     endpoint: Optional[str] = None
     enabled: Optional[bool] = None
     auto_save_on_conversation_end: Optional[bool] = None
     ask_user_confirmation: Optional[bool] = None
-    priority_fields: Optional[List[str]] = None
+    priority_fields: Optional[List[str]] = None  # Legacy field
+    essential_fields: Optional[List[str]] = Field(default_factory=lambda: [
+        'location', 'property_type_name', 'number_of_bedrooms', 
+        'rent_charge', 'furnishing_status', 'amenities', 'lease_duration'
+    ])
 
 class FallbackConfig(BaseModel):
     enable: Optional[bool] = None

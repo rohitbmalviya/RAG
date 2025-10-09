@@ -21,10 +21,10 @@ class Retriever:
         self._logger.debug(f" Query: '{query}'")
         self._logger.debug(f" Raw filters: {filters}")
         if top_k is None and (self._config.top_k in (None, 0)):
-            self._logger.warning("Retrieval top_k not provided and config.top_k is missing/zero; defaulting to 5")
+            self._logger.debug("Retrieval top_k not provided and config.top_k is missing/zero; defaulting to 5")
         k = top_k if top_k is not None else (self._config.top_k or 5)
         if self._config.num_candidates_multiplier in (None, 0):
-            self._logger.warning("Retrieval num_candidates_multiplier is missing/zero; using 1x top_k")
+            self._logger.debug("Retrieval num_candidates_multiplier is missing/zero; using 1x top_k")
         num_candidates = k * max(1, self._config.num_candidates_multiplier or 1)
         query_vec = self._embedder.embed([query], task_type="retrieval_query")[0]
         
@@ -40,7 +40,7 @@ class Retriever:
                 if key in allowed:
                     validated_filters[key] = value
                 else:
-                    self._logger.warning("Ignoring invalid filter key '%s'. Allowed: %s", key, sorted(list(allowed)))
+                    self._logger.debug("Ignoring invalid filter key '%s'. Allowed: %s", key, sorted(list(allowed)))
         
         self._logger.debug(f" Prioritized filters: {prioritized_filters}")
         self._logger.debug(f" Validated filters: {validated_filters}")

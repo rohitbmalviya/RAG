@@ -5,7 +5,7 @@ app:
   eager_init: false
 
 logging:
-  level: INFO
+  level: DEBUG  # DEBUG level for comprehensive logging (shows all logs)
 
 database:
   driver: postgres
@@ -455,14 +455,24 @@ memory:
     summarize_older: true # ask LLM to summarize older history
     ttl_seconds: 900 # expire after 15 min of inactivity
 
-# Requirement gathering configuration (optional feature)
+# Requirement gathering configuration (NEW API FORMAT)
 requirement_gathering:
-  endpoint: http://localhost:5000/backend/api/v1/user/requirement
+  endpoint: http://localhost:5000/backend/api/v1/admin/user-request-mappings/request-response
   retry_attempts: 3
   retry_delay: 2
   enabled: true
   auto_save_on_conversation_end: true
   ask_user_confirmation: true
+  # Essential property fields that MUST be collected before sending
+  essential_fields:
+    - location               # Location (emirate/city/community)
+    - property_type_name     # Property type (apartment/villa/studio)
+    - number_of_bedrooms     # Number of bedrooms
+    - rent_charge            # Budget/Annual rent
+    - furnishing_status      # Furnished/Semi-furnished/Unfurnished
+    - amenities              # Required amenities (gym, pool, parking, etc.)
+    - lease_duration         # Lease duration (1 year, 2 years, etc.)
+  # Legacy field (kept for backward compatibility)
   priority_fields:
     - location
     - property_type_name

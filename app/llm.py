@@ -45,7 +45,7 @@ class RequirementGatheringMetrics:
         if self.total_attempts % 10 == 0:
             from .utils import get_logger
             logger = get_logger(__name__)
-            logger.info(
+            logger.debug(
                 f"Requirement gathering stats: {self.successful_sends}/{self.total_attempts} successful"
             )
 
@@ -60,6 +60,9 @@ class Conversation:
         self.alternatives_suggested: List[Dict[str, Any]] = []  
         self.conversation_start_time: float = 0.0
         self.last_activity_time: float = 0.0
+        self.user_contact_info: Dict[str, str] = {}  # Store operator name & contact
+        self.current_flow: Optional[str] = None  # "requirement_gathering" | None
+        self.waiting_for_contact_info: bool = False  # True when we asked for contact
 
     def add_message(self, role: str, content: str):
         import time
@@ -175,6 +178,37 @@ class Conversation:
             self.conversation_start_time = time.time()
         return time.time() - self.conversation_start_time
 
+    def set_contact_info(self, operator_name: str, contact_info: str):
+        """Store user contact information for requirement gathering"""
+        self.user_contact_info = {
+            "operator_name": operator_name,
+            "contact_info": contact_info
+        }
+
+    def get_contact_info(self) -> Dict[str, str]:
+        """Get stored contact information"""
+        return self.user_contact_info
+
+    def has_contact_info(self) -> bool:
+        """Check if contact info is collected"""
+        return bool(
+            self.user_contact_info.get("operator_name") and 
+            self.user_contact_info.get("contact_info")
+        )
+    
+    def set_flow_state(self, flow: Optional[str], waiting_for_contact: bool = False):
+        """Set conversation flow state (GENERIC - works for any datasource)"""
+        self.current_flow = flow
+        self.waiting_for_contact_info = waiting_for_contact
+    
+    def is_in_requirement_gathering(self) -> bool:
+        """Check if currently in requirement gathering flow"""
+        return self.current_flow == "requirement_gathering"
+    
+    def is_waiting_for_contact(self) -> bool:
+        """Check if waiting for user contact information"""
+        return self.waiting_for_contact_info
+
 LLM_PROVIDERS: Dict[str, Type["BaseLLMProvider"]] = {}
 
 def _extract_json_from_response(response: str, expected_type: str = "object") -> Any:
@@ -240,7 +274,7 @@ class GoogleLLM(BaseLLMProvider):
         if self._api_key:
             genai.configure(api_key=self._api_key)
         else:
-            self._logger.warning("LLM API key missing for Google provider")
+            self._logger.debug("LLM API key missing for Google provider")
         self._model = genai.GenerativeModel(model_name=self._config.model)
 
     def generate(self, messages: List[Dict[str, str]]) -> str:
@@ -268,7 +302,7 @@ class OpenAILLM(BaseLLMProvider):
             raise RuntimeError("openai package not available") from exc
 
         if not self._api_key:
-            self._logger.warning("LLM_MODEL_API_KEY missing for OpenAI provider")
+            self._logger.debug("LLM_MODEL_API_KEY missing for OpenAI provider")
 
         self._client = OpenAI(api_key=self._api_key)
 
@@ -344,7 +378,7 @@ class DynamicAlternativesGenerator:
             alternatives = _extract_json_from_response(response, "array")
             return alternatives if isinstance(alternatives, list) else []
         except Exception as e:
-            self.llm_client._logger.warning(f"LLM alternatives generation failed: {e}")
+            self.llm_client._logger.debug(f"LLM alternatives generation failed: {e}")
         
         return []
     
@@ -477,7 +511,7 @@ class LLMClient(BaseLLM):
                 self._logger.debug(f" Reasoning: {result.get('reasoning', 'N/A')}")
                 return result
         except Exception as e:
-            self._logger.warning(f"LLM classification failed: {e}, using fallback")
+            self._logger.debug(f"LLM classification failed: {e}, using fallback")
         
         # Fallback: simple pattern matching if LLM fails
         return self._fallback_classification(user_input)
@@ -543,15 +577,15 @@ class LLMClient(BaseLLM):
                 issues = result.get("issues", [])
                 
                 if not is_valid and issues:
-                    self._logger.warning(f" LLM Validation: Issues found - {len(issues)} problems")
+                    self._logger.debug(f" LLM Validation: Issues found - {len(issues)} problems")
                     for issue in issues[:3]:  # Show top 3 issues
-                        self._logger.warning(f" - {issue}")
+                        self._logger.debug(f" - {issue}")
                     # Add disclaimer to response
                     answer += "\n\n*Please verify details directly with the listing for accuracy.*"
                 else:
                     self._logger.debug(f" LLM Validation: Response is accurate")
         except Exception as e:
-            self._logger.warning(f"LLM validation failed: {e}")
+            self._logger.debug(f"LLM validation failed: {e}")
         
         return answer
     
@@ -589,7 +623,7 @@ class LLMClient(BaseLLM):
         Works for ANY domain (properties, cars, jobs, products, etc.)
         """
         user_input = user_input.strip()
-        
+
         from .config import get_settings
         settings = get_settings()
 
@@ -599,6 +633,16 @@ class LLMClient(BaseLLM):
         self._logger.debug(f" User preferences: {self.conversation.get_preferences()}")
         self._logger.debug(f" Has data: {bool(retrieved_chunks)}")
         self._logger.debug(f" Retrieved chunks count: {len(retrieved_chunks) if retrieved_chunks else 0}")
+        self._logger.debug(f" Flow state: {self.conversation.current_flow}, Waiting for contact: {self.conversation.waiting_for_contact_info}")
+        
+        # CONTEXT-AWARE: Check if we're waiting for contact info (prevent repetition)
+        if self.conversation.is_waiting_for_contact():
+            self._logger.debug(f" CONTEXT: We asked for contact info, user is responding")
+            # User is responding to our contact info request - go directly to requirement gathering
+            answer = self.gather_requirements_and_send(user_input, ask_confirmation=False)
+            self._add_conversation_messages(user_input, answer)
+            return answer, False
+        
         # Use LLM to classify query (NO hardcoded keywords!)
         classification = self.classify_query(user_input)
         category = classification.get("category", "entity_search")
@@ -609,22 +653,25 @@ class LLMClient(BaseLLM):
         if category == "price_inquiry" and settings.llm.query_handling.enable_price_aggregation:
             self._logger.debug(f" PRICE INQUIRY DETECTED!")
             answer = self._handle_average_price_query(user_input)
-            self._logger.info(f" PRICE CALCULATION COMPLETED!")
+            self._logger.debug(f" PRICE CALCULATION COMPLETED!")
             self._add_conversation_messages(user_input, answer)
             return answer, False  # No sources for price queries
         
         elif category == "knowledge_inquiry" and settings.llm.query_handling.enable_knowledge_search:
             self._logger.debug(f" KNOWLEDGE INQUIRY DETECTED!")
             answer = self._handle_general_knowledge_query(user_input)
-            self._logger.info(f" KNOWLEDGE QUERY COMPLETED!")
+            self._logger.debug(f" KNOWLEDGE QUERY COMPLETED!")
             self._add_conversation_messages(user_input, answer)
             return answer, False  # No sources for knowledge queries
         
         elif category == "requirement_gathering" and settings.llm.query_handling.enable_requirement_gathering:
             self._logger.debug(f" REQUIREMENT GATHERING DETECTED!")
+            # Set flow state for context-aware conversation
+            self.conversation.set_flow_state("requirement_gathering")
+            self._logger.debug(f" Flow state set to: requirement_gathering")
             self._logger.debug(f" CALLING gather_requirements_and_send() METHOD...")
             answer = self.gather_requirements_and_send(user_input, ask_confirmation=False)
-            self._logger.info(f" REQUIREMENT GATHERING COMPLETED!")
+            self._logger.debug(f" REQUIREMENT GATHERING COMPLETED!")
             self._add_conversation_messages(user_input, answer)
             return answer, False
         
@@ -636,6 +683,14 @@ class LLMClient(BaseLLM):
             answer, _ = self._parse_llm_response(llm_response)
             self._add_conversation_messages(user_input, answer)
             return answer, False  # No sources for greetings
+        
+        # CONTEXT-AWARE: If in requirement gathering flow, continue gathering (don't search!)
+        if self.conversation.is_in_requirement_gathering() and not self.conversation.is_waiting_for_contact():
+            self._logger.debug(f" CONTEXT: Already in requirement gathering, user providing more details")
+            self._logger.debug(f" Continuing requirement gathering (NOT searching for properties)")
+            answer = self.gather_requirements_and_send(user_input, ask_confirmation=False)
+            self._add_conversation_messages(user_input, answer)
+            return answer, False
         
         # Default: entity_search - process with full LLM intelligence
         self._logger.debug(f" ENTITY SEARCH - Processing with LLM intelligence...")
@@ -654,7 +709,7 @@ class LLMClient(BaseLLM):
 
         return answer, should_show_sources
 
-    
+
     def _build_comprehensive_context(self, user_input: str, retrieved_chunks: Optional[List[RetrievedChunk]] = None) -> Dict[str, Any]:
         """Build comprehensive context for LLM decision making."""
         context = {
@@ -832,7 +887,7 @@ class LLMClient(BaseLLM):
         filters_context = ""
         if hasattr(self, '_last_extracted_filters') and self._last_extracted_filters:
             filters_context = f"\n\nEXTRACTED FILTERS FROM QUERY: {self._last_extracted_filters}\n\nCRITICAL: You MUST respect these filters. Only show properties that match these criteria."
-        
+
         property_context = ""
         if retrieved_chunks:
             property_context = "\n\nPROPERTY DATA AVAILABLE:\n"
@@ -856,7 +911,7 @@ class LLMClient(BaseLLM):
             filters_context=filters_context,
             property_context=property_context
         )
-        
+
         return prompt
 
     def _parse_llm_response(self, llm_response: str) -> tuple[str, bool]:
@@ -932,30 +987,6 @@ class LLMClient(BaseLLM):
             
         return " | ".join(context_parts)
 
-    def _summarize_conversation_context(self) -> str:
-        """Summarize conversation for requirement gathering"""
-        messages = self.conversation.get_messages()
-        preferences = self.conversation.get_preferences()
-        
-        if not messages:
-            return "No conversation history available."
-        
-        user_messages = [msg["content"] for msg in messages if msg["role"] == "user"]
-        summary_parts = []
-        summary_parts.append(f"User discussed: {'; '.join(user_messages[-3:])}")  
-        
-        if preferences:
-            pref_items = []
-            for key, value in preferences.items():
-                if isinstance(value, dict) and "lte" in value:
-                    pref_items.append(f"{key}: up to {value['lte']}")
-                else:
-                    pref_items.append(f"{key}: {value}")
-            if pref_items:
-                summary_parts.append(f"Extracted preferences: {', '.join(pref_items)}")
-        
-        return " | ".join(summary_parts)
-
     def _extract_detailed_requirements_from_conversation(self) -> Dict[str, Any]:
         """Extract detailed requirements from conversation messages using LLM"""
         messages = self.conversation.get_messages()
@@ -978,61 +1009,12 @@ class LLMClient(BaseLLM):
             json_match = re.search(r'\{.*\}', response, re.DOTALL)
             if json_match:
                 extracted_requirements = json.loads(json_match.group(0))
-                self._logger.info(f" Successfully extracted: {extracted_requirements}")
+                self._logger.debug(f" Successfully extracted: {extracted_requirements}")
                 return extracted_requirements
         except Exception as e:
             self._logger.error(f" Error extracting requirements: {e}")
         return {}
 
-    def _check_required_fields(self, extracted_requirements: Dict[str, Any]) -> List[str]:
-        """LLM-based missing field detection - NO hardcoded required fields list!
-        
-        Uses LLM to determine what essential information is missing.
-        Works for ANY domain (properties, cars, jobs, products, etc.)
-        """
-        from .config import get_settings
-        from .instructions import GENERIC_REQUIREMENT_EXTRACTION_TEMPLATE
-        
-        settings = get_settings()
-        
-        # Check if requirement gathering is enabled
-        if not settings.llm.query_handling.enable_requirement_gathering:
-            return []  # Feature disabled
-        
-        # Get minimal context from config (generic!)
-        entity_name = settings.database.table  # "properties", "cars", "jobs", etc.
-        
-        # Build requirement extraction prompt using generic template
-        current_requirements_str = json.dumps(extracted_requirements, indent=2) if extracted_requirements else "{}"
-        
-        extraction_prompt = GENERIC_REQUIREMENT_EXTRACTION_TEMPLATE.format(
-            entity_name=entity_name,
-            current_requirements=current_requirements_str
-        )
-        
-        try:
-            # Let LLM determine what's missing using its intelligence!
-            response = self._safe_generate([{"role": "user", "content": extraction_prompt}])
-            result = _extract_json_from_response(response, "object")
-            
-            if result:
-                missing_fields = result.get("missing_fields", [])
-                questions = result.get("questions_to_ask", [])
-                priority = result.get("priority", "unknown")
-                
-                self._logger.debug(f" LLM Missing Field Detection:")
-                self._logger.debug(f" Missing fields: {missing_fields}")
-                self._logger.debug(f" Priority: {priority}")
-                if questions:
-                    self._logger.debug(f"Questions to ask: {questions[:2]}")
-                
-                return missing_fields
-        except Exception as e:
-            self._logger.warning(f"LLM missing field detection failed: {e}, using fallback")
-        
-        # Fallback: simple check for basic fields if LLM fails
-        return self._fallback_missing_fields_check(extracted_requirements)
-    
     def _fallback_missing_fields_check(self, requirements: Dict[str, Any]) -> List[str]:
         """Simple fallback missing field check if LLM fails"""
         from .config import get_settings
@@ -1053,255 +1035,436 @@ class LLMClient(BaseLLM):
         return missing
 
     def _ask_for_missing_requirements(self, missing_fields: List[str], extracted_requirements: Dict[str, Any]) -> str:
-        """Ask user to provide missing required fields"""
+        """LLM generates friendly, interactive question for missing fields (GENERIC)"""
         self._logger.debug(f" ASKING FOR MISSING REQUIREMENTS: {missing_fields}")
-        # Build response acknowledging what we have and asking for missing info
-        response = "Perfect! I'd like to gather all the details for you. Let me ask a few quick questions to get everything we need:\n\n"
+        from .instructions import INTERACTIVE_REQUIREMENT_QUESTION_TEMPLATE
+        from .config import get_settings
+        settings = get_settings()
         
-        # Acknowledge what we already know
+        # Build human-readable summary of what we have (GENERIC)
+        current_summary = []
         if extracted_requirements:
-            response += "**What I know so far:**\n"
-            for key, value in extracted_requirements.items():
+            for key, value in list(extracted_requirements.items())[:4]:  # Show max 4
                 if isinstance(value, dict) and "lte" in value:
-                    response += f"• {key.replace('_', ' ').title()}: Up to {value['lte']:,}\n"
+                    current_summary.append(f"- Budget: under {value['lte']:,}")
                 elif isinstance(value, dict) and "gte" in value:
-                    response += f"• {key.replace('_', ' ').title()}: At least {value['gte']:,}\n"
+                    current_summary.append(f"- Minimum: {value['gte']:,}")
                 elif isinstance(value, list):
-                    response += f"• {key.replace('_', ' ').title()}: {', '.join(value)}\n"
-                else:
-                    response += f"• {key.replace('_', ' ').title()}: {value}\n"
-            response += "\n"
+                    current_summary.append(f"- {key.replace('_', ' ').title()}: {', '.join(str(v) for v in value[:2])}")
+                elif value:
+                    current_summary.append(f"- {key.replace('_', ' ').title()}: {value}")
         
-        # Ask for missing fields
-        response += "**I still need to know:**\n"
-        field_questions = {
-            'location': "Which emirate/city are you looking in? (e.g., Dubai, Abu Dhabi, Sharjah)",
-            'property_type_name': "What type of property? (e.g., apartment, villa, studio, townhouse)",
-            'number_of_bedrooms': "How many bedrooms do you need?",
-            'rent_charge': "What's your budget range for annual rent? (e.g., under 150K, 100K-200K)",
-            'furnishing_status': "Do you prefer furnished, semi-furnished, or unfurnished?",
-            'amenities': "Any specific amenities you need? (e.g., gym, pool, parking, balcony)",
-            'lease_duration': "How long do you want to lease for? (e.g., 1 year, 2 years, 3 years)"
+        current_summary_text = "\n".join(current_summary) if current_summary else "None (starting fresh)"
+        
+        # Convert field names to human-readable (GENERIC)
+        missing_labels = [field.replace('_', ' ').title() for field in missing_fields[:3]]
+        missing_list = "\n".join([f"- {label}" for label in missing_labels])
+        
+        # Let LLM generate friendly, interactive question
+        prompt = INTERACTIVE_REQUIREMENT_QUESTION_TEMPLATE.format(
+            current_requirements_summary=current_summary_text,
+            missing_fields_list=missing_list
+        )
+        
+        self._logger.debug(f" Generating interactive question with LLM (friendly & professional)")
+        
+        try:
+            response = self._safe_generate([{"role": "user", "content": prompt}])
+            friendly_question = response.strip()
+            self._logger.debug(f" LLM generated friendly question: {friendly_question[:150]}...")
+            return friendly_question
+        except Exception as e:
+            self._logger.debug(f" LLM generation failed: {e}, using fallback")
+            # Simple fallback if LLM fails
+            entity = settings.database.table[:-1]  # "properties" -> "property"
+            return f"Perfect! I have some details. To find the best {entity} for you, could you tell me about {missing_labels[0].lower()} and {missing_labels[1].lower() if len(missing_labels) > 1 else 'other preferences'}?"
+
+    def gather_requirements_and_send(self, user_input: str, ask_confirmation: bool = False) -> str:
+        """Multi-step requirement gathering with NEW API format
+        
+        Steps:
+        1. Extract property requirements
+        2. Check for missing essential fields
+        3. Collect operator contact info
+        4. Generate request name (LLM)
+        5. Generate plain text description (LLM)
+        6. Send to endpoint with new format
+        """
+        self._logger.debug(f"Requirement gathering triggered: {user_input[:50]}")
+        
+        # STEP 1: Extract property requirements from conversation
+        extracted_requirements = self._extract_detailed_requirements_from_conversation()
+        preferences = self.conversation.get_preferences()
+        merged_requirements = {**preferences, **extracted_requirements}
+        
+        self._logger.debug(f"Merged requirements: {merged_requirements}")
+        
+        # STEP 2: Check if ALL ESSENTIAL property fields are present
+        missing_property_fields = self._check_essential_property_fields(merged_requirements)
+        
+        if missing_property_fields:
+            self._logger.debug(f"Missing essential property fields: {missing_property_fields}")
+            return self._ask_for_missing_requirements(missing_property_fields, merged_requirements)
+        
+        # STEP 3: Check if contact info is collected
+        if not self.conversation.has_contact_info():
+            self._logger.debug("Need to collect operator contact info")
+            
+            # Try to extract from current user input
+            contact_info = self._extract_contact_info_from_message(user_input)
+            
+            if contact_info.get("operator_name") and contact_info.get("contact_info"):
+                # Successfully extracted from message
+                self.conversation.set_contact_info(
+                    contact_info["operator_name"],
+                    contact_info["contact_info"]
+                )
+                # Reset waiting flag - we got the contact info!
+                self.conversation.set_flow_state("requirement_gathering", waiting_for_contact=False)
+                self._logger.debug(f"Contact info collected: {contact_info['operator_name']}")
+                self._logger.debug(f"Reset waiting_for_contact_info = False (we have it now)")
+            else:
+                # Need to ask for contact info
+                return self._ask_for_contact_information(merged_requirements)
+        
+        # STEP 4: Generate request name using LLM
+        request_name = self._generate_request_name(merged_requirements)
+        self._logger.debug(f"Generated request name: {request_name}")
+        
+        # STEP 5: Generate plain text description using LLM (ONLY summary paragraph, NO lists)
+        description = self._generate_plain_text_description(merged_requirements)
+        self._logger.debug(f"Generated description: {description[:200]}...")
+        
+        # STEP 6: Build payload for NEW API format
+        contact_info = self.conversation.get_contact_info()
+        
+        payload = {
+            "request": {
+                "name": request_name,
+                "operator": contact_info.get("operator_name", "Unknown"),
+                "remark": contact_info.get("contact_info", "No contact info provided"),
+                "details": {
+                    "description": description
+                }
+            }
         }
         
-        for i, field in enumerate(missing_fields, 1):
-            question = field_questions.get(field, f"What's your preference for {field.replace('_', ' ')}?")
-            response += f"{i}. {question}\n"
+        self._logger.debug("Sending requirement with new API format")
+        self._logger.debug(f"Payload: {json.dumps(payload, indent=2)}")
         
-        response += "\nOnce I have these details, I'll save everything for our team to find the perfect match for you!"
+        # STEP 7: Send to endpoint
+        return self._send_requirements_to_new_endpoint(payload)
+    
+    def _generate_request_name(self, requirements: Dict[str, Any]) -> str:
+        """LLM generates concise request title from requirements"""
+        from .instructions import REQUEST_NAME_GENERATION_TEMPLATE
+        
+        self._logger.debug("Generating request name from requirements")
+        self._logger.debug(f"Requirements: {json.dumps(requirements, indent=2)}")
+        
+        requirements_str = json.dumps(requirements, indent=2)
+        prompt = REQUEST_NAME_GENERATION_TEMPLATE.format(requirements=requirements_str)
+        
+        self._logger.debug(f"Request name generation prompt length: {len(prompt)} chars")
+        
+        try:
+            response = self._safe_generate([{"role": "user", "content": prompt}])
+            self._logger.debug(f"LLM response for request name: {response[:200]}")
+            
+            result = _extract_json_from_response(response, "object")
+            if result and "request_name" in result:
+                self._logger.debug(f"Successfully generated request name: {result['request_name']}")
+                return result["request_name"]
+            else:
+                self._logger.debug("LLM response did not contain request_name, using fallback")
+        except Exception as e:
+            self._logger.debug(f"Failed to generate request name: {e}")
+        
+        # Fallback
+        fallback_name = self._create_fallback_request_name(requirements)
+        self._logger.debug(f"Using fallback request name: {fallback_name}")
+        return fallback_name
+    
+    def _create_fallback_request_name(self, requirements: Dict[str, Any]) -> str:
+        """Create simple request name if LLM fails"""
+        from .config import get_settings
+        settings = get_settings()
+        
+        parts = []
+        
+        if requirements.get('number_of_bedrooms'):
+            parts.append(f"{requirements['number_of_bedrooms']} BHK")
+        
+        if requirements.get('property_type_name'):
+            parts.append(requirements['property_type_name'])
+        
+        # Get location
+        for loc_field in settings.database.location_hierarchy:
+            if requirements.get(loc_field):
+                parts.append(f"in {requirements[loc_field]}")
+                break
+        
+        return " ".join(parts) if parts else "Property Requirement Request"
+    
+    def _generate_plain_text_description(self, requirements: Dict[str, Any]) -> str:
+        """LLM generates SINGLE PARAGRAPH plain text description (NO lists, NO conversation)"""
+        from .instructions import PLAIN_TEXT_DESCRIPTION_TEMPLATE
+        
+        self._logger.debug("Generating plain text description (single paragraph only)")
+        self._logger.debug(f"Requirements count: {len(requirements)} fields")
+        
+        requirements_str = json.dumps(requirements, indent=2)
+        prompt = PLAIN_TEXT_DESCRIPTION_TEMPLATE.format(requirements=requirements_str)
+        
+        self._logger.debug(f"Description generation prompt length: {len(prompt)} chars")
+        
+        try:
+            response = self._safe_generate([{"role": "user", "content": prompt}])
+            description = response.strip()
+            self._logger.debug(f"Successfully generated description ({len(description)} chars)")
+            self._logger.debug(f"Description preview: {description[:300]}...")
+            return description
+        except Exception as e:
+            self._logger.error(f"Failed to generate description: {e}")
+            fallback_desc = self._create_fallback_description(requirements)
+            self._logger.debug(f"Using fallback description ({len(fallback_desc)} chars)")
+            return fallback_desc
+    
+    def _create_fallback_description(self, requirements: Dict[str, Any]) -> str:
+        """Create simple SINGLE PARAGRAPH description if LLM fails (GENERIC)"""
+        from .config import get_settings
+        settings = get_settings()
+        
+        # Build flowing narrative paragraph (NO lists!)
+        parts = []
+        
+        # Bedrooms + furnishing + type
+        if requirements.get('number_of_bedrooms'):
+            parts.append(f"{requirements['number_of_bedrooms']}-bedroom")
+        if requirements.get('furnishing_status'):
+            parts.append(requirements['furnishing_status'])
+        if requirements.get('property_type_name'):
+            parts.append(requirements['property_type_name'])
+        
+        # Location
+        for loc_field in settings.database.location_hierarchy:
+            if requirements.get(loc_field):
+                parts.append(f"in {requirements[loc_field]}")
+                break
+        
+        # Budget
+        pricing_field = settings.database.pricing_field
+        if requirements.get(pricing_field):
+            budget = requirements[pricing_field]
+            if isinstance(budget, dict) and 'lte' in budget:
+                parts.append(f"with budget under {budget['lte']:,.0f} {settings.database.display.currency} annually")
+            else:
+                parts.append(f"with rent {budget:,.0f} {settings.database.display.currency} annually")
+        
+        # Lease duration
+        if requirements.get('lease_duration'):
+            parts.append(f"for lease of {requirements['lease_duration']}")
+        
+        # Amenities
+        if requirements.get('amenities'):
+            amenities = requirements['amenities'] if isinstance(requirements['amenities'], list) else [requirements['amenities']]
+            parts.append(f"with {', '.join(amenities)}")
+        
+        # Build natural sentence
+        desc = "Requirement gathering for " + " ".join(parts) + "."
+        return desc
+    
+    def _extract_contact_info_from_message(self, user_input: str) -> Dict[str, str]:
+        """Extract operator name and contact from user message using LLM"""
+        from .instructions import CONTACT_INFO_EXTRACTION_TEMPLATE
+        
+        self._logger.debug(f"Extracting contact info from message: {user_input[:100]}")
+        
+        prompt = CONTACT_INFO_EXTRACTION_TEMPLATE.format(user_message=user_input)
+        
+        try:
+            response = self._safe_generate([{"role": "user", "content": prompt}])
+            self._logger.debug(f"Contact extraction LLM response: {response[:200]}")
+            
+            result = _extract_json_from_response(response, "object")
+            if result:
+                self._logger.debug(f"Contact info extracted - Name: {result.get('operator_name')}, Has contact: {bool(result.get('contact_info'))}")
+                return result
+            else:
+                self._logger.debug("LLM response did not contain valid JSON")
+        except Exception as e:
+            self._logger.debug(f"Failed to extract contact info: {e}")
+        
+        self._logger.debug("No contact info found in message")
+        return {"operator_name": None, "contact_info": None}
+    
+    def _ask_for_contact_information(self, requirements: Dict[str, Any]) -> str:
+        """Ask for operator name and contact details - NATURAL & CONVERSATIONAL"""
+        from .config import get_settings
+        settings = get_settings()
+        
+        # Build a natural summary of what we have (GENERIC - works for any datasource)
+        entity_name = settings.database.table[:-1]  # "properties" -> "property", "cars" -> "car"
+        
+        # Set flag to remember we asked for contact (prevents repetition)
+        self.conversation.set_flow_state("requirement_gathering", waiting_for_contact=True)
+        self._logger.debug(f"Set waiting_for_contact_info = True (prevent asking twice)")
+        
+        # Natural, human-like response (1-2 sentences, conversational)
+        response = f"Perfect! I have all your {entity_name} requirements. "
+        response += "To save this and have our team reach out, I just need your name and how to contact you (phone or email). "
+        response += "What's your name and contact?"
         
         return response
-
-    def gather_requirements_and_send(self, user_input: str, ask_confirmation: bool = True) -> str:
-        """Gather requirements and optionally send to endpoint"""
-        self._logger.debug(f"\n REQUIREMENT GATHERING TRIGGERED:")
-        self._logger.debug(f" User input: '{user_input}'")
-        self._logger.debug(f" Ask confirmation: {ask_confirmation}")
-        self._logger.debug(f" Session ID: {str(id(self.conversation))}")
-        # Extract detailed requirements from conversation
-        extracted_requirements = self._extract_detailed_requirements_from_conversation()
-        self._logger.debug(f" Extracted requirements: {extracted_requirements}")
-        # Merge with conversation preferences (which contain emirate, etc.)
-        preferences = self.conversation.get_preferences()
-        self._logger.debug(f" Conversation preferences: {preferences}")
-        # Merge extracted requirements with preferences, giving priority to extracted
-        merged_requirements = {**preferences, **extracted_requirements}
-        self._logger.debug(f" Merged requirements: {merged_requirements}")
-        # Check if we have sufficient data to send to endpoint
-        missing_fields = self._check_required_fields(merged_requirements)
-        self._logger.debug(f" Missing required fields: {missing_fields}")
-        if missing_fields:
-            # Ask user to provide missing data
-            return self._ask_for_missing_requirements(missing_fields, merged_requirements)
-        
-        conversation_summary = self._summarize_conversation_context()
-        requirement_summary = {
-            "user_query": user_input,
-            "preferences": preferences,
-            "extracted_requirements": merged_requirements,
-            "conversation_summary": conversation_summary,
-            "session_id": str(id(self.conversation)),
-            "timestamp": time.time()
-        }
-        
-        self._logger.debug(f" User preferences: {preferences}")
-        self._logger.debug(f" Conversation summary: {conversation_summary[:200]}...")
-        if ask_confirmation:
-            response = (
-                "I'll summarize what you're looking for:\n\n"
-                "**Your Requirements:**\n"
-            )
-            if merged_requirements:
-                for key, value in merged_requirements.items():
-                    if isinstance(value, dict) and "lte" in value:
-                        response += f"• {key.replace('_', ' ').title()}: Up to {value['lte']:,}\n"
-                    else:
-                        response += f"• {key.replace('_', ' ').title()}: {value}\n"
-            else:
-                response += f"• Based on your query: {user_input}\n"
-                
-            response += (
-                f"\n**Conversation Summary:** {conversation_summary}\n\n"
-                "Would you like me to save these requirements? Our team will work with agencies to find matching properties and notify you when available.\n\n"
-                "Reply 'yes' to save, or 'no' to continue searching with different criteria."
-            )
-            
-            return response
-        else:
-            self._logger.debug(f" Sending requirements directly to endpoint (no confirmation needed)")
-            return self._send_requirements_to_endpoint(requirement_summary)
     
-    def _send_requirements_to_endpoint(self, requirements: Dict[str, Any]) -> str:
-        """Send requirements to the backend endpoint with retry logic and fallback storage.
+    def _check_essential_property_fields(self, requirements: Dict[str, Any]) -> List[str]:
+        """Check if all ESSENTIAL property fields are present"""
+        from .config import get_settings
+        settings = get_settings()
         
-        BACKEND API CONTRACT:
-        Expected fields (all optional):
-        - session_id (str): Conversation session identifier
-        - location (str): Location preference (emirate/city/community)
-        - property_type (str): Type of property (apartment, villa, studio, etc.)
-        - number_of_bedrooms (int): Number of bedrooms
-        - rent_charge (float): Budget for annual rent
-        - furnishing_status (str): Furnished, semi-furnished, unfurnished
-        - amenities (List[str]): List of amenities (gym, pool, parking, etc.)
-        - nearby_landmarks (str): Nearby landmarks preference
-        - building_name (str): Specific building name
-        - rent_type (str): Lease/Holiday Home/Management Fees
+        essential = settings.requirement_gathering.essential_fields
+        self._logger.debug(f"Checking {len(essential)} essential fields: {essential}")
+        self._logger.debug(f"Current requirements: {list(requirements.keys())}")
         
-        NOTE: If your backend controller uses different field names, update the mapping below.
-        """
+        missing = []
         
-        endpoint = self._config.requirement_gathering.endpoint or "http://localhost:5000/backend/api/v1/user/requirement"
+        for field in essential:
+            if field == 'location':
+                # Check any location field
+                location_fields = settings.database.location_hierarchy
+                has_location = any(requirements.get(f) for f in location_fields)
+                if not has_location:
+                    missing.append('location')
+                    self._logger.debug(f"Missing: location (checked fields: {location_fields})")
+                else:
+                    found_in = [f for f in location_fields if requirements.get(f)]
+                    self._logger.debug(f"Location found in: {found_in}")
+            else:
+                if not requirements.get(field):
+                    missing.append(field)
+                    self._logger.debug(f"Missing: {field}")
+                else:
+                    self._logger.debug(f"Present: {field} = {requirements[field]}")
         
-        self._logger.debug(f"\n SENDING REQUIREMENTS TO API ENDPOINT:")
-        self._logger.debug(f" Endpoint: {endpoint}")
-        self._logger.debug(f" Requirements data: {requirements}")
-        # Transform the data to match backend controller expectations
-        extracted_requirements = requirements.get("extracted_requirements", {})
-        preferences = requirements.get("preferences", {})
+        if missing:
+            self._logger.debug(f"Missing {len(missing)} essential fields: {missing}")
+        else:
+            self._logger.debug("All essential fields present!")
         
-        # Merge extracted requirements with preferences (extracted takes priority)
-        merged_data = {**preferences, **extracted_requirements}
+        return missing
+    
+    def _send_requirements_to_new_endpoint(self, payload: Dict[str, Any]) -> str:
+        """Send requirements using NEW API format with comprehensive logging
         
-        # CRITICAL: Map RAG field names to backend controller field names
-        # If your backend uses different naming conventions, update this mapping
-        backend_payload = {
-            "session_id": requirements.get("session_id", ""),
-            # Location mapping - handles emirate, city, or community
-            "location": self._extract_location(merged_data),
-            # Property type mapping - maps property_type_name → property_type
-            "property_type": merged_data.get("property_type_name"),
-            # Direct mappings
-            "number_of_bedrooms": merged_data.get("number_of_bedrooms"),
-            # Rent charge - extracts value from range if needed
-            "rent_charge": self._extract_rent_charge_value(merged_data),
-            "furnishing_status": merged_data.get("furnishing_status"),
-            # Amenities - aggregates from boolean fields and amenities list
-            "amenities": self._extract_amenities(merged_data),
-            "nearby_landmarks": merged_data.get("nearby_landmarks"),
-            "building_name": merged_data.get("building_name"),
-            # Rent type mapping - maps rent_type_name → rent_type
-            "rent_type": merged_data.get("rent_type_name"),
-            # Additional fields for context
-            "conversation_summary": requirements.get("conversation_summary", ""),
-            "timestamp": requirements.get("timestamp", time.time())
+        NEW API FORMAT:
+        {
+          "request": {
+            "name": "2 BHK Apartment in Dubai Marina",
+            "operator": "John Doe",
+            "remark": "+971-50-xxx, john@example.com",
+            "details": {
+              "description": "Plain text description..."
+            }
+          }
         }
-        
-        # Remove None values to keep payload clean
-        backend_payload = {k: v for k, v in backend_payload.items() if v is not None}
-        
-        self._logger.debug(f" 🔄 TRANSFORMED PAYLOAD FOR BACKEND:")
-        self._logger.debug(f" Original extracted_requirements: {extracted_requirements}")
-        self._logger.debug(f" Original preferences: {preferences}")
-        self._logger.debug(f" Merged data: {merged_data}")
-        self._logger.debug(f" Backend payload: {backend_payload}")
-        self._logger.debug(f" Payload size: {len(str(backend_payload))} bytes")
-        enhanced_requirements = backend_payload
+        """
+        endpoint = self._config.requirement_gathering.endpoint or "http://localhost:5000/backend/api/v1/admin/user-request-mappings/request-response"
         retry_attempts = 3
         retry_delay = 2
         
+        self._logger.debug("="*60)
+        self._logger.debug("SENDING REQUIREMENTS TO BACKEND")
+        self._logger.debug("="*60)
+        self._logger.debug(f"Endpoint: {endpoint}")
+        self._logger.debug(f"Payload structure:")
+        self._logger.debug(f"  - request.name: {payload['request']['name']}")
+        self._logger.debug(f"  - request.operator: {payload['request']['operator']}")
+        self._logger.debug(f"  - request.remark: {payload['request']['remark'][:50]}...")
+        self._logger.debug(f"  - request.details.description: {len(payload['request']['details']['description'])} chars")
+        self._logger.debug(f"Complete payload: {json.dumps(payload, indent=2)}")
+        
         for attempt in range(retry_attempts):
+            self._logger.debug(f"API Request Attempt {attempt + 1}/{retry_attempts}")
+                
             try:
-                self._logger.debug(f" 📤 API CALL ATTEMPT {attempt + 1}/{retry_attempts}:")
-                self._logger.debug(f" URL: {endpoint}")
-                self._logger.debug(f" Payload: {enhanced_requirements}")
-                self._logger.info(f"Sending requirements to endpoint: {endpoint} (attempt {attempt + 1}/{retry_attempts})")
+                self._logger.debug("Making POST request to backend...")
                 response = requests.post(
                     endpoint,
-                    json=enhanced_requirements,
+                    json=payload,
                     timeout=15,
                     headers={"Content-Type": "application/json"}
                 )
                 
-                self._logger.debug(f" Response Status: {response.status_code}")
-                self._logger.debug(f" Response Headers: {dict(response.headers)}")
+                self._logger.debug(f"Response status code: {response.status_code}")
+                self._logger.debug(f"Response headers: {dict(response.headers)}")
+                
                 if response.text:
-                    self._logger.debug(f" Response Body: {response.text[:500]}...")
+                    self._logger.debug(f"Response body: {response.text[:500]}")
+                
                 if response.status_code == 200:
-                    self._logger.info(f" SUCCESS: Requirements sent successfully!")
+                    self._logger.debug("="*60)
+                    self._logger.debug("SUCCESS! Requirements sent to backend")
+                    self._logger.debug("="*60)
                     self.conversation.set_requirement_gathered(True)
                     self.requirement_metrics.log_attempt(True)
-                    self._logger.info("Requirements successfully sent to endpoint")
+                    # Reset flow state - requirement gathering complete
+                    self.conversation.set_flow_state(None, waiting_for_contact=False)
+                    self._logger.debug(f"Reset flow state to None (requirement gathering complete)")
+                    
                     return (
                         "Perfect! I've saved your requirements successfully.\n\n"
-                        "Your property preferences have been recorded and we'll keep them in mind for future searches.\n\n"
+                        "Your property preferences have been recorded. Our team will work with agencies "
+                        "to find matching properties and notify you when available.\n\n"
                         "Is there anything else I can help you with today?"
                     )
                 elif attempt < retry_attempts - 1:
-                    self._logger.debug(f" RETRY: Status {response.status_code}, retrying in {retry_delay}s")
-                    self._logger.warning(f"Endpoint returned status {response.status_code}, retrying in {retry_delay}s")
+                    self._logger.debug(f"Endpoint returned {response.status_code}, will retry in {retry_delay}s")
                     time.sleep(retry_delay)
                     retry_delay *= 2  
                     continue
                 else:
-                    self._logger.error(f" FAILED: Status {response.status_code} after {retry_attempts} attempts")
-                    self._logger.warning(f"Endpoint returned status {response.status_code} after {retry_attempts} attempts")
-                    self._save_to_fallback_storage(enhanced_requirements)
+                    self._logger.error(f"FAILED after {retry_attempts} attempts - Status: {response.status_code}")
+                    self._logger.error(f"Response body: {response.text[:200]}")
                     self.requirement_metrics.log_attempt(False)
                     return (
                         "I've noted your requirements, but there was a technical issue saving them to our system. "
-                        "Don't worry - I can still help you search for properties or try again later. "
+                        "Don't worry - I can still help you search for properties. "
                         "Would you like to continue exploring available options?"
                     )
                     
             except requests.exceptions.Timeout:
+                self._logger.error(f"Request timeout on attempt {attempt + 1}")
                 if attempt < retry_attempts - 1:
-                    self._logger.debug(f" ⏰ TIMEOUT: Retrying in {retry_delay}s")
-                    self._logger.warning(f"Request timeout, retrying in {retry_delay}s")
+                    self._logger.debug(f"Will retry in {retry_delay}s...")
                     time.sleep(retry_delay)
                     retry_delay *= 2
                     continue
                 else:
-                    self._logger.error(f" TIMEOUT FAILED: After all retry attempts")
-                    self._logger.error("Request timeout after all retry attempts")
-                    self._save_to_fallback_storage(enhanced_requirements)
+                    self._logger.error("TIMEOUT after all retry attempts")
                     self.requirement_metrics.log_attempt(False)
                     return (
-                        "I've carefully noted your requirements! While there was a technical issue with our system, "
+                        "I've carefully noted your requirements! While there was a technical issue, "
                         "I can still help you search for properties with different criteria. "
                         "Would you like to try some alternative searches?"
                     )
             except Exception as e:
+                self._logger.error(f"Request exception on attempt {attempt + 1}: {type(e).__name__} - {e}")
                 if attempt < retry_attempts - 1:
-                    self._logger.error(f" ERROR: {e}, retrying in {retry_delay}s")
-                    self._logger.warning(f"Request failed: {e}, retrying in {retry_delay}s")
+                    self._logger.debug(f"Will retry in {retry_delay}s...")
                     time.sleep(retry_delay)
                     retry_delay *= 2
                     continue
                 else:
-                    self._logger.error(f" ERROR FAILED: {e} after {retry_attempts} attempts")
-                    self._logger.error(f"Failed to send requirements to endpoint after {retry_attempts} attempts: {e}")
-                    self._save_to_fallback_storage(enhanced_requirements)
+                    self._logger.error(f"FAILED after all retry attempts: {e}")
                     self.requirement_metrics.log_attempt(False)
                     return (
-                        "I've carefully noted your requirements! While there was a technical issue with our system, "
-                        "I can still help you search for properties with different criteria. "
-                        "Would you like to try some alternative searches?"
-                    )
-        return (
-            "I've carefully noted your requirements! While there was a technical issue with our system, "
+                        "I've carefully noted your requirements! While there was a technical issue, "
             "I can still help you search for properties with different criteria. "
             "Would you like to try some alternative searches?"
         )
+        
+        self._logger.error("Unexpected end of retry loop")
+        return "I apologize, but I encountered an issue. Please try again."
     
     def _extract_location(self, merged_data: Dict[str, Any]) -> Optional[str]:
         """Extract location from merged data, checking multiple possible fields"""
@@ -1380,7 +1543,7 @@ class LLMClient(BaseLLM):
                 "conversation_summary": requirements.get("conversation_summary", ""),
                 "fallback_reason": "endpoint_failure"
             }
-            self._logger.info(f"Saved requirements to fallback storage: {fallback_data}")
+            self._logger.debug(f"Saved requirements to fallback storage: {fallback_data}")
         except Exception as e:
             self._logger.error(f"Failed to save to fallback storage: {e}")
 

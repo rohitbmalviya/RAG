@@ -22,7 +22,7 @@ class VectorStoreClient(BaseVectorStore):
         if config.username and config.password:
             http_auth = (config.username, config.password)
         if not config.hosts:
-            self._logger.warning("Vector store hosts not configured; client cannot connect")
+            self._logger.debug("Vector store hosts not configured; client cannot connect")
         try:
             self._client = Elasticsearch(hosts=config.hosts, basic_auth=http_auth)
         except Exception as exc:
@@ -120,7 +120,7 @@ class VectorStoreClient(BaseVectorStore):
         if settings.vector_db.index_settings:
             mapping["settings"] = settings.vector_db.index_settings
         if not self._config.similarity:
-            self._logger.warning("Vector DB similarity not set; relying on backend defaults")
+            self._logger.debug("Vector DB similarity not set; relying on backend defaults")
         try:
             self._client.indices.create(index=index, **mapping)
         except Exception as exc:
@@ -133,7 +133,7 @@ class VectorStoreClient(BaseVectorStore):
             if self._index_exists(index):
                 self._client.indices.delete(index=index)
         except Exception as exc:
-            self._logger.warning("Failed to delete index '%s': %s", index, exc)
+            self._logger.debug("Failed to delete index '%s': %s", index, exc)
 
     def upsert(
         self, documents: List[Document], embeddings: List[List[float]], refresh: Optional[bool] = None

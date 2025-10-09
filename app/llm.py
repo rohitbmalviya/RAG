@@ -63,6 +63,14 @@ class Conversation:
         self.user_contact_info: Dict[str, str] = {}  # Store operator name & contact
         self.current_flow: Optional[str] = None  # "requirement_gathering" | None
         self.waiting_for_contact_info: bool = False  # True when we asked for contact
+        self.search_memory: Dict[str, Any] = {
+            "last_query": None,              # Original user query
+            "last_semantic_query": None,     # Query used for semantic search
+            "retrieved_candidates": [],      # ALL retrieved chunks (for client-side filtering)
+            "current_filters": {},           # Currently applied filters
+            "refinement_count": 0,           # How many times user refined search
+            "search_context": "",            # LLM-generated context summary
+        }
 
     def add_message(self, role: str, content: str):
         import time
@@ -208,6 +216,76 @@ class Conversation:
     def is_waiting_for_contact(self) -> bool:
         """Check if waiting for user contact information"""
         return self.waiting_for_contact_info
+
+    def store_search_results(
+        self, 
+        query: str, 
+        semantic_query: str,
+        candidates: List['RetrievedChunk'], 
+        filters: Dict[str, Any],
+        context_summary: str = ""
+    ):
+        """Store search results for progressive refinement (GENERIC - works for any domain)"""
+        self.search_memory["last_query"] = query
+        self.search_memory["last_semantic_query"] = semantic_query
+        self.search_memory["retrieved_candidates"] = candidates.copy() if candidates else []
+        self.search_memory["current_filters"] = filters.copy() if filters else {}
+        self.search_memory["search_context"] = context_summary
+        self.search_memory["refinement_count"] = 0
+    
+    def update_search_refinement(self, new_filters: Dict[str, Any], context_summary: str = ""):
+        """Update filters for refinement (GENERIC - works for any domain)"""
+        if new_filters:
+            self.search_memory["current_filters"].update(new_filters)
+        self.search_memory["refinement_count"] += 1
+        if context_summary:
+            self.search_memory["search_context"] = context_summary
+    
+    def get_search_candidates(self) -> List['RetrievedChunk']:
+        """Get stored candidates for filtering (GENERIC - works for any domain)"""
+        return self.search_memory.get("retrieved_candidates", [])
+    
+    def has_search_memory(self) -> bool:
+        """Check if we have previous search to refine (GENERIC - works for any domain)"""
+        return bool(self.search_memory.get("retrieved_candidates"))
+    
+    def clear_search_memory(self):
+        """Clear search memory for new topic (GENERIC - works for any domain)"""
+        self.search_memory = {
+            "last_query": None,
+            "last_semantic_query": None,
+            "retrieved_candidates": [],
+            "current_filters": {},
+            "refinement_count": 0,
+            "search_context": "",
+        }
+    
+    def get_search_context_summary(self) -> str:
+        """Get human-readable search context for LLM (GENERIC - works for any domain)"""
+        if not self.has_search_memory():
+            return "No previous search in memory"
+        
+        memory = self.search_memory
+        summary_parts = []
+        
+        if memory.get('last_query'):
+            summary_parts.append(f"Previous search: '{memory['last_query']}'")
+        
+        candidate_count = len(memory.get('retrieved_candidates', []))
+        if candidate_count > 0:
+            summary_parts.append(f"Retrieved: {candidate_count} candidates")
+        
+        if memory.get('current_filters'):
+            summary_parts.append(f"Current filters: {memory['current_filters']}")
+        
+        refinement_count = memory.get('refinement_count', 0)
+        if refinement_count > 0:
+            summary_parts.append(f"Refinements: {refinement_count}")
+        
+        if memory.get('search_context'):
+            summary_parts.append(f"Context: {memory['search_context']}")
+        
+        return " | ".join(summary_parts) if summary_parts else "Search memory exists but empty"
 
 LLM_PROVIDERS: Dict[str, Type["BaseLLMProvider"]] = {}
 
@@ -523,7 +601,274 @@ class LLMClient(BaseLLM):
             "confidence": 0.3, 
             "reasoning": "LLM classification unavailable, defaulting to entity search"
         }
+    
+    def detect_query_intent(self, user_input: str) -> Dict[str, Any]:
+        """
+        LLM-driven query intent detection - 100% GENERIC, NO hardcoded patterns!
+        
+        Determines if user query is:
+        - NEW_SEARCH: Start fresh search
+        - REFINEMENT: Add constraints to previous search
+        - CLARIFICATION: Answering a question
+        
+        Works for ANY domain (properties, cars, jobs, products, etc.)
+        
+        Args:
+            user_input: Current user query
+            
+        Returns:
+            Dict with keys: intent, confidence, reasoning, suggested_action
+        """
+        from .instructions import QUERY_INTENT_ANALYSIS_TEMPLATE
+        
+        self._logger.debug(f"\n QUERY INTENT DETECTION (LLM-Driven):")
+        self._logger.debug(f" User query: '{user_input}'")
+        
+        # Build context for LLM
+        conversation_history = self._get_conversation_context()
+        search_memory = self.conversation.get_search_context_summary()
+        
+        self._logger.debug(f" Has search memory: {self.conversation.has_search_memory()}")
+        if search_memory:
+            self._logger.debug(f" Search memory: {search_memory[:200]}...")
+        
+        # Generate prompt
+        prompt = QUERY_INTENT_ANALYSIS_TEMPLATE.format(
+            conversation_history=conversation_history if conversation_history else "No previous conversation",
+            search_memory=search_memory,
+            current_query=user_input
+        )
+        
+        # Get LLM decision
+        try:
+            response = self._safe_generate([{"role": "user", "content": prompt}])
+            intent_data = _extract_json_from_response(response, "object")
+            
+            if intent_data and "intent" in intent_data:
+                self._logger.debug(f" LLM Intent Decision:")
+                self._logger.debug(f"   Intent: {intent_data.get('intent')}")
+                self._logger.debug(f"   Confidence: {intent_data.get('confidence')}")
+                self._logger.debug(f"   Reasoning: {intent_data.get('reasoning')}")
+                self._logger.debug(f"   Suggested Action: {intent_data.get('suggested_action')}")
+                return intent_data
+            else:
+                self._logger.debug(f" LLM response missing intent field, using fallback")
+                
+        except Exception as e:
+            self._logger.error(f" Intent detection failed: {e}, using fallback")
+        
+        # Fallback: if no search memory, must be new search
+        if not self.conversation.has_search_memory():
+            self._logger.debug(f" FALLBACK: No search memory → NEW_SEARCH")
+            return {
+                "intent": "NEW_SEARCH",
+                "confidence": 1.0,
+                "reasoning": "No previous search exists in memory",
+                "suggested_action": "Perform new semantic search"
+            }
+        else:
+            self._logger.debug(f" FALLBACK: Search memory exists → REFINEMENT")
+            return {
+                "intent": "REFINEMENT",
+                "confidence": 0.5,
+                "reasoning": "Fallback due to LLM error, assuming refinement",
+                "suggested_action": "Try refining previous search"
+            }
+    
+    def apply_progressive_filters(
+        self, 
+        candidates: List[RetrievedChunk], 
+        new_filters: Dict[str, Any]
+    ) -> List[RetrievedChunk]:
+        """
+        Apply filters to existing candidates - FULLY GENERIC!
+        
+        Works for ANY field type:
+        - Numeric (price, age, size, distance, etc.)
+        - Text (color, status, category, etc.)
+        - Boolean (verified, available, featured, etc.)
+        - List (amenities, tags, features, etc.)
+        
+        Args:
+            candidates: Previously retrieved chunks
+            new_filters: New filters to apply
+        
+        Returns:
+            Filtered chunks
+        """
+        if not new_filters:
+            self._logger.debug(" No filters to apply, returning all candidates")
+            return candidates
+        
+        self._logger.debug(f"\n PROGRESSIVE FILTERING (GENERIC):")
+        self._logger.debug(f" Input candidates: {len(candidates)}")
+        self._logger.debug(f" Filters to apply: {new_filters}")
+        
+        filtered = []
+        
+        for chunk in candidates:
+            metadata = chunk.metadata
+            matches_all = True
+            
+            for filter_key, filter_value in new_filters.items():
+                metadata_value = metadata.get(filter_key)
+                
+                # GENERIC FILTER LOGIC (works for ANY field!)
+                
+                # Case 1: Range query (dict with gte/lte/gt/lt)
+                if isinstance(filter_value, dict):
+                    if not self._matches_range_filter(metadata_value, filter_value, filter_key):
+                        matches_all = False
+                        break
+                
+                # Case 2: List query (any value in list)
+                elif isinstance(filter_value, list):
+                    if not self._matches_list_filter(metadata_value, filter_value, filter_key):
+                        matches_all = False
+                        break
+                
+                # Case 3: Exact match
+                else:
+                    if not self._matches_exact_filter(metadata_value, filter_value, filter_key):
+                        matches_all = False
+                        break
+            
+            if matches_all:
+                filtered.append(chunk)
+        
+        self._logger.debug(f" Output candidates: {len(filtered)}")
+        if len(candidates) > 0:
+            efficiency = (len(filtered) / len(candidates)) * 100
+            self._logger.debug(f" Filter efficiency: {efficiency:.1f}% of candidates match")
+        
+        return filtered
+    
+    def _matches_range_filter(self, value: Any, range_spec: Dict[str, Any], field_name: str = "") -> bool:
+        """Generic range matching (works for numbers, dates, etc.) - FULLY GENERIC"""
+        if value is None:
+            return False
+        
+        try:
+            # Convert to number for comparison
+            if isinstance(value, (int, float)):
+                num_value = value
+            else:
+                num_value = float(value)
+            
+            if "lte" in range_spec:
+                if num_value > range_spec["lte"]:
+                    return False
+            
+            if "gte" in range_spec:
+                if num_value < range_spec["gte"]:
+                    return False
+            
+            if "lt" in range_spec:
+                if num_value >= range_spec["lt"]:
+                    return False
+            
+            if "gt" in range_spec:
+                if num_value <= range_spec["gt"]:
+                    return False
+            
+            return True
+            
+        except (ValueError, TypeError) as e:
+            self._logger.debug(f" Range filter failed for field '{field_name}', value: {value}, error: {e}")
+            return False
+    
+    def _matches_list_filter(self, value: Any, filter_list: List[Any], field_name: str = "") -> bool:
+        """Generic list matching (value must be IN filter list) - FULLY GENERIC"""
+        if value is None:
+            return False
+        
+        # Case 1: Metadata value is a list (e.g., amenities, tags)
+        if isinstance(value, list):
+            # ANY value in metadata must match ANY value in filter
+            for item in value:
+                if item in filter_list:
+                    return True
+            return False
+        
+        # Case 2: Metadata value is single value
+        return value in filter_list
+    
+    def _matches_exact_filter(self, value: Any, filter_value: Any, field_name: str = "") -> bool:
+        """Generic exact matching - FULLY GENERIC"""
+        if value is None:
+            return False
+        
+        # Case-insensitive string comparison
+        if isinstance(value, str) and isinstance(filter_value, str):
+            return value.lower() == filter_value.lower()
+        
+        # Exact match for other types
+        return value == filter_value
 
+    def _handle_progressive_refinement(self, user_input: str) -> tuple[str, bool]:
+        """
+        Handle progressive refinement - GENERIC!
+        Filter existing candidates with new constraints.
+        
+        This enables users to refine search results without re-querying the database.
+        Works for ANY domain (properties, cars, jobs, products, etc.)
+        """
+        from .query_processor import extract_filters_with_llm_context_aware
+        
+        self._logger.debug(f"\n═══════════════════════════════════════════════════════════")
+        self._logger.debug(f" PROGRESSIVE REFINEMENT HANDLER")
+        self._logger.debug(f"═══════════════════════════════════════════════════════════")
+        self._logger.debug(f" Previous query: {self.conversation.search_memory['last_query']}")
+        self._logger.debug(f" Candidates in memory: {len(self.conversation.get_search_candidates())}")
+        self._logger.debug(f" Current filters: {self.conversation.search_memory['current_filters']}")
+        
+        # Extract NEW filters from user query (LLM-driven)
+        new_filters = extract_filters_with_llm_context_aware(user_input, self)
+        self._logger.debug(f" New filters extracted: {new_filters}")
+        
+        # Merge with existing filters
+        current_filters = self.conversation.search_memory["current_filters"].copy()
+        merged_filters = {**current_filters, **new_filters}
+        self._logger.debug(f" Merged filters: {merged_filters}")
+        
+        # Apply filters to stored candidates (client-side filtering - NO DB query!)
+        candidates = self.conversation.get_search_candidates()
+        filtered = self.apply_progressive_filters(candidates, merged_filters)
+        
+        self._logger.debug(f" After filtering: {len(filtered)} results")
+        self._logger.debug(f"═══════════════════════════════════════════════════════════")
+        
+        # Update search memory with refined results
+        self.conversation.update_search_refinement(
+            new_filters=merged_filters,
+            context_summary=f"Refined with: {new_filters}"
+        )
+        
+        if not filtered:
+            self._logger.debug(f" No results after refinement - offering alternatives/gathering")
+            # No chunks to store
+            self._refinement_result_chunks = []
+            # Build context with no chunks
+            context = self._build_comprehensive_context(user_input, [])
+            llm_response = self._get_llm_intelligent_response(context)
+            answer, _ = self._parse_llm_response(llm_response)
+            self._add_conversation_messages(user_input, answer)
+            return answer, False
+        
+        # Generate response with filtered results
+        self._logger.debug(f" Generating response with {len(filtered)} filtered results")
+        
+        # Store filtered chunks for main.py to create sources
+        self._refinement_result_chunks = filtered[:8]  # Store for source creation
+        self._logger.debug(f" Stored {len(self._refinement_result_chunks)} filtered chunks for source creation")
+        
+        context = self._build_comprehensive_context(user_input, filtered[:8])
+        llm_response = self._get_llm_intelligent_response(context)
+        answer, should_show_sources = self._parse_llm_response(llm_response)
+        
+        self._add_conversation_messages(user_input, answer)
+        return answer, True  # Always show sources for refinement results
+    
     def validate_response_context(self, answer: str, retrieved_chunks: List[RetrievedChunk]) -> str:
         """LLM-based context validation - NO hardcoded location lists!
         
@@ -678,6 +1023,17 @@ class LLMClient(BaseLLM):
         elif category == "general_conversation":
             # Handle greetings and general conversation
             self._logger.debug(f" GENERAL CONVERSATION DETECTED!")
+            
+            # CRITICAL FIX: Clear search memory for greetings (not real searches!)
+            if self.conversation.has_search_memory():
+                self._logger.debug(f" Clearing search memory (greeting/general conversation, not entity search)")
+                self.conversation.clear_search_memory()
+            
+            # Also clear temp search results if any
+            if hasattr(self, '_temp_search_results'):
+                self._logger.debug(f" Clearing temp search results (not storing for greeting)")
+                delattr(self, '_temp_search_results')
+            
             context = self._build_comprehensive_context(user_input, retrieved_chunks)
             llm_response = self._get_llm_intelligent_response(context)
             answer, _ = self._parse_llm_response(llm_response)
@@ -692,8 +1048,46 @@ class LLMClient(BaseLLM):
             self._add_conversation_messages(user_input, answer)
             return answer, False
         
-        # Default: entity_search - process with full LLM intelligence
-        self._logger.debug(f" ENTITY SEARCH - Processing with LLM intelligence...")
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # PROGRESSIVE REFINEMENT: LLM-driven intent detection (NEW_SEARCH vs REFINEMENT)
+        # ═══════════════════════════════════════════════════════════════════════════════
+        intent = self.detect_query_intent(user_input)
+        intent_type = intent.get("intent", "NEW_SEARCH")
+        
+        self._logger.debug(f" Query Intent: {intent_type}")
+        self._logger.debug(f" Reasoning: {intent.get('reasoning')}")
+        
+        # Handle REFINEMENT: Filter existing candidates (client-side, no DB query)
+        if intent_type == "REFINEMENT" and self.conversation.has_search_memory():
+            self._logger.debug(f" PROGRESSIVE REFINEMENT PATH - Filtering existing results")
+            return self._handle_progressive_refinement(user_input)
+        
+        # Handle CLARIFICATION: User answering a question
+        elif intent_type == "CLARIFICATION":
+            self._logger.debug(f" CLARIFICATION PATH - User responding to question")
+            context = self._build_comprehensive_context(user_input, retrieved_chunks)
+            llm_response = self._get_llm_intelligent_response(context)
+            answer, should_show_sources = self._parse_llm_response(llm_response)
+            self._add_conversation_messages(user_input, answer)
+            return answer, should_show_sources if retrieved_chunks else False
+        
+        # Default: NEW_SEARCH or entity_search - process with full LLM intelligence
+        self._logger.debug(f" NEW SEARCH / ENTITY SEARCH - Processing with LLM intelligence...")
+        
+        # CRITICAL FIX: Finalize search result storage for entity_search
+        if hasattr(self, '_temp_search_results'):
+            temp_results = self._temp_search_results
+            self._logger.debug(f" Finalizing search result storage (entity_search detected)")
+            self.conversation.store_search_results(
+                query=temp_results["query"],
+                semantic_query=temp_results["query"],
+                candidates=temp_results["candidates"],
+                filters=temp_results["filters"],
+                context_summary=f"Initial search: {temp_results['query']}"
+            )
+            self._logger.debug(f" Stored {len(temp_results['candidates'])} candidates in conversation memory")
+            delattr(self, '_temp_search_results')  # Clean up temp storage
+        
         context = self._build_comprehensive_context(user_input, retrieved_chunks)
         llm_response = self._get_llm_intelligent_response(context)
         answer, should_show_sources = self._parse_llm_response(llm_response)
@@ -708,7 +1102,6 @@ class LLMClient(BaseLLM):
         self._add_conversation_messages(user_input, answer)
 
         return answer, should_show_sources
-
 
     def _build_comprehensive_context(self, user_input: str, retrieved_chunks: Optional[List[RetrievedChunk]] = None) -> Dict[str, Any]:
         """Build comprehensive context for LLM decision making."""
@@ -727,8 +1120,7 @@ class LLMClient(BaseLLM):
         """Check if retrieved chunks contain actual property data."""
         
         return bool(retrieved_chunks)
-
-    
+   
     def _handle_general_knowledge_query(self, user_input: str) -> str:
         """Handle general knowledge queries using web search."""
         self._logger.debug(f"\n HANDLING GENERAL KNOWLEDGE QUERY:")
@@ -776,8 +1168,7 @@ class LLMClient(BaseLLM):
             return response
         except Exception:
             return self._generate_llm_knowledge_response(query)
-    
-    
+       
     def _handle_average_price_query(self, user_input: str) -> str:
         """Handle average price queries by calculating from database."""
         self._logger.debug(f"\n HANDLING AVERAGE PRICE QUERY:")
@@ -841,8 +1232,7 @@ class LLMClient(BaseLLM):
                 "I apologize, but I encountered an issue calculating the average price. "
                 "Let me help you search for specific properties instead. What are you looking for?"
             )
-
-
+    
     def _get_llm_intelligent_response(self, context: Dict[str, Any]) -> str:
         """Get intelligent response from LLM with all decision making."""
 
@@ -903,6 +1293,17 @@ class LLMClient(BaseLLM):
                 display_value = metadata.get(primary_field, "Unknown")
                 price_value = metadata.get(pricing_field, "N/A") if pricing_field else "N/A"
                 self._logger.debug(f" Property {i}: {display_value} | {price_value}")
+        else:
+            # CRITICAL: Explicitly tell LLM there are NO properties
+            property_context = "\n\n⚠️ CRITICAL: NO PROPERTY DATA AVAILABLE (0 properties match the criteria)\n\n"
+            property_context += "DO NOT say 'I found properties' or 'I've got options' - YOU HAVE ZERO PROPERTIES!\n"
+            property_context += "You MUST:\n"
+            property_context += "1. Be HONEST: Say 'I couldn't find properties matching all your criteria'\n"
+            property_context += "2. Offer TWO options:\n"
+            property_context += "   a) Try alternate searches (suggest nearby locations, flexible budget, different property types)\n"
+            property_context += "   b) Save your requirements (gather for future notification)\n"
+            property_context += "3. Make them feel heard and valued\n"
+            self._logger.debug(f" NO PROPERTIES - Added explicit no-match guidance")
         # Use centralized template - NO DUPLICATES!
         prompt = INTELLIGENT_DECISION_PROMPT_TEMPLATE.format(
             user_input=user_input,
@@ -1312,7 +1713,7 @@ class LLMClient(BaseLLM):
         
         # Natural, human-like response (1-2 sentences, conversational)
         response = f"Perfect! I have all your {entity_name} requirements. "
-        response += "To save this and have our team reach out, I just need your name and how to contact you (phone or email). "
+        response += "To save this and have our team reach out, I just need your name and how to contact you (phone number and email). "
         response += "What's your name and contact?"
         
         return response

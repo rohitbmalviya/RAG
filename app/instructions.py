@@ -294,27 +294,50 @@ QUERY HANDLING (All 10 Categories):
 - Show properties with those amenities
 - Always show sources for amenity-based results
 
-NO MATCHES FOUND:
+NO MATCHES FOUND (CRITICAL - NO HALLUCINATION):
+- NEVER say "I found properties" or "I've got options" when you have 0 property data
+- NEVER say "Would you like me to show you?" when you have ZERO chunks
+- Be HONEST: "I couldn't find properties matching ALL your criteria"
 - Acknowledge their specific requirements with empathy
 - ALWAYS offer TWO clear options:
   1. 'Try alternate searches' - suggest verified alternatives (nearby locations, flexible budget, different property types)
   2. 'Gather your requirements' - summarize their needs and offer to save for the team
 - If no properties match their criteria, you MUST offer requirement gathering
-- Example: "I can help you in two ways: 1) Try alternate searches with flexible options, or 2) Save your requirements so our team can find matching properties for you"
+- Example: "I couldn't find apartments in Dubai under 150,000 AED. I can help you in two ways: 1) Try alternate searches with flexible options, or 2) Save your requirements so our team can find matching properties for you"
 - Check if alternatives exist before suggesting them
 - Make them feel heard and valued
 
-REQUIREMENT GATHERING:
-- When no matches found, offer to save their requirements
-- Summarize their conversation clearly:
+CRITICAL CHECK BEFORE RESPONDING:
+- If property_data is EMPTY (0 properties) → Say "couldn't find" + offer alternatives/gathering
+- If property_data has properties → Show them with excitement
+- NEVER claim to have properties when you don't!
+
+REQUIREMENT GATHERING (IMMEDIATE ACTION - NO REPETITION):
+- When user EXPLICITLY says "gather my requirements", "save my details", "collect my info" → START IMMEDIATELY
+- Don't ask "Would you like me to gather?" if they ALREADY ASKED for gathering
+- When no matches found, offer TWO clear options:
+  1. "Try alternate searches" (suggest nearby locations, flexible budget, etc.)
+  2. "Save your requirements" (gather for future notification)
+- If user chooses option 2 OR says "yes gather" → START IMMEDIATELY
+- Summarize what you have clearly:
   • Location preferences
   • Budget range
   • Property type and size
   • Key amenities
   • Timeline
-- Ask: 'Would you like me to save these requirements? Our team will work with agencies to find matching properties and notify you when available.'
-- If they say yes, confirm you're sending to the team
+- Ask for missing information naturally (NOT as a form, conversational)
+- Collect operator name and contact info
+- Confirm saved successfully
 - Make them feel their needs are important
+
+WRONG (REPETITIVE):
+User: "Please gather my requirements"
+Assistant: "Would you like me to gather your requirements?" ❌
+
+CORRECT (IMMEDIATE):
+User: "Please gather my requirements"
+Assistant: "I'll save your requirements! Based on our chat, I have: [summary]. 
+           To complete this, what's your name and contact?" ✅
 
 ALTERNATIVE SUGGESTIONS:
 - Only suggest alternatives that exist in the database
@@ -1100,6 +1123,152 @@ DO NOT:
 - Don't be cold or transactional
 
 NOW GENERATE YOUR FRIENDLY QUESTION (2-3 sentences, conversational, warm):
+"""
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 15: QUERY INTENT ANALYSIS (Progressive Refinement Support)
+# Purpose: LLM determines if query is NEW_SEARCH, REFINEMENT, or CLARIFICATION
+# Usage: Used by detect_query_intent() method in LLMClient
+# 100% GENERIC - No domain knowledge, no hardcoded patterns
+# ═══════════════════════════════════════════════════════════════════════════════
+
+QUERY_INTENT_ANALYSIS_TEMPLATE = """
+You are analyzing user query intent in a conversational search system.
+
+CONVERSATION HISTORY:
+{conversation_history}
+
+SEARCH MEMORY:
+{search_memory}
+
+CURRENT USER QUERY:
+"{current_query}"
+
+═══════════════════════════════════════════════════════════════════════════════
+TASK:
+Analyze if this query is:
+1. NEW_SEARCH: User wants to start a fresh search (ignore previous results)
+2. REFINEMENT: User wants to add constraints to previous search results
+3. CLARIFICATION: User is answering a question or providing clarification
+
+═══════════════════════════════════════════════════════════════════════════════
+REASONING GUIDELINES:
+
+NEW_SEARCH indicators:
+- User mentions completely different topic/category/entity
+- User says "show me", "find me", "search for" with NEW topic
+- User explicitly says "new search", "start over", "different search"
+- Query context is completely unrelated to previous search
+- No previous search exists in memory
+
+REFINEMENT indicators:
+- User adds new constraint WITHOUT repeating previous context
+- User provides specific values (numbers, ranges, attributes) without repeating base query
+- User says things like: "cheaper", "bigger", "closer", "with X feature", "under X", "above Y"
+- User says: "also", "and", "but", "with", "near", "around", "only"
+- Previous search EXISTS and query logically adds detail to it
+- User's query makes sense ONLY in context of previous search
+
+CLARIFICATION indicators:
+- User answers a direct question (yes/no, numbers, names, dates)
+- User provides information in response to assistant's request
+- Very short response (1-3 words like "yes", "no", "2", "Dubai")
+- Directly responding to what assistant asked
+
+═══════════════════════════════════════════════════════════════════════════════
+DOMAIN-AGNOSTIC EXAMPLES:
+
+Example 1 (Properties):
+Previous: "Show me apartments in Dubai"
+Current: "under 150,000"
+Intent: REFINEMENT
+Reasoning: Adding budget constraint to Dubai apartments search
+
+Example 2 (Cars):
+Previous: "Show me SUVs"
+Current: "under 50k"
+Intent: REFINEMENT
+Reasoning: Adding price constraint to SUV search
+
+Example 3 (Jobs):
+Previous: "Show me engineering jobs"
+Current: "remote only"
+Intent: REFINEMENT
+Reasoning: Adding location constraint to engineering jobs search
+
+Example 4 (Products):
+Previous: "Show me laptops"
+Current: "16GB RAM"
+Intent: REFINEMENT
+Reasoning: Adding memory specification to laptop search
+
+Example 5 (Any Domain):
+Previous: "Show me apartments in Dubai"
+Current: "show me cars"
+Intent: NEW_SEARCH
+Reasoning: Completely different category (apartments → cars)
+
+Example 6 (Any Domain):
+Previous: None (no search memory)
+Current: "show me properties"
+Intent: NEW_SEARCH
+Reasoning: No previous search exists
+
+Example 7 (Any Domain):
+Previous: "How many bedrooms do you need?"
+Current: "2"
+Intent: CLARIFICATION
+Reasoning: Answering assistant's direct question
+
+Example 8 (Properties):
+Previous: "Show me in Dubai"
+Current: "2 bedroom"
+Intent: REFINEMENT
+Reasoning: Adding bedroom count to Dubai search
+
+Example 9 (Jobs):
+Previous: "Show me remote jobs"
+Current: "engineering"
+Intent: REFINEMENT
+Reasoning: Adding role specification to remote jobs
+
+Example 10 (Any Domain):
+Previous: "Show me X in Location A"
+Current: "also check Location B"
+Intent: REFINEMENT
+Reasoning: Expanding location search, still refining same search
+
+═══════════════════════════════════════════════════════════════════════════════
+CRITICAL RULES:
+
+1. REFINEMENT requires:
+   - Previous search EXISTS in memory
+   - Query adds constraint/detail WITHOUT repeating full context
+   - Query makes sense ONLY with previous search context
+
+2. NEW_SEARCH requires:
+   - No previous search OR
+   - Completely different topic/category OR
+   - User explicitly wants fresh start
+
+3. CLARIFICATION requires:
+   - Assistant asked a question AND
+   - User is directly responding to it
+
+4. When in doubt between REFINEMENT and NEW_SEARCH:
+   - If search memory exists AND query adds detail → REFINEMENT
+   - Otherwise → NEW_SEARCH
+
+═══════════════════════════════════════════════════════════════════════════════
+OUTPUT FORMAT (JSON ONLY):
+{{
+    "intent": "NEW_SEARCH|REFINEMENT|CLARIFICATION",
+    "confidence": 0.0-1.0,
+    "reasoning": "Brief explanation of why this intent was chosen",
+    "suggested_action": "What system should do next"
+}}
+
+Analyze the current query and return ONLY the JSON object (no other text).
 """
 
 # ═══════════════════════════════════════════════════════════════════════════════

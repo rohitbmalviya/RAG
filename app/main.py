@@ -544,21 +544,92 @@ async def query_endpoint(request: QueryRequest, http_request: Request) -> QueryR
         if hasattr(llm_client, '_last_extracted_filters'):
             llm_client._last_extracted_filters = filters
         
-        # Retrieve chunks for property queries with error handling
-        logger.debug(f"\n RETRIEVING CHUNKS:")
-        try:
-            chunks: List[RetrievedChunk] = pipeline_state.retriever_client.retrieve(
-                normalized_query,
-                filters=filters,
-                top_k=request.top_k,
-            )
-            logger.debug(f"   Retrieved {len(chunks)} chunks")
-            logger.debug(f"Retrieval successful - {len(chunks)} chunks retrieved")
-        except Exception as exc:
-            logger.error(f"Retrieval failed: {exc}")
-            # Continue with empty chunks - LLM will handle no results case
-            chunks = []
-            logger.debug("Continuing with empty chunks due to retrieval failure")
+        logger.debug(f"\n INTENT DETECTION:")
+        logger.debug(f"   Has search memory: {llm_client.conversation.has_search_memory()}")
+        
+        # If LLM has search memory, check intent
+        if llm_client.conversation.has_search_memory():
+            try:
+                intent = llm_client.detect_query_intent(normalized_query)
+                intent_type = intent.get("intent", "NEW_SEARCH")
+                logger.debug(f"   Intent: {intent_type}")
+                logger.debug(f"   Reasoning: {intent.get('reasoning')}")
+                
+                if intent_type == "REFINEMENT":
+                    logger.debug(f"   REFINEMENT DETECTED - Skipping retrieval (LLM will filter internally)")
+                    # LLM will handle refinement internally using stored candidates
+                    chunks = []  # Empty chunks - LLM won't use these
+                else:
+                    logger.debug(f"   NEW_SEARCH or CLARIFICATION - Performing retrieval")
+                    # Clear search memory for new search
+                    llm_client.conversation.clear_search_memory()
+                    # Perform new retrieval
+                    try:
+                        chunks_display, chunks_all = pipeline_state.retriever_client.retrieve(
+                            normalized_query,
+                            filters=filters,
+                            top_k=request.top_k,
+                            retrieve_for_refinement=True  # Get extra candidates for future refinement
+                        )
+                        chunks = chunks_display
+                        logger.debug(f"   Retrieved {len(chunks_display)} to display, {len(chunks_all)} to store")
+                        
+                        # Store search results temporarily (will finalize after LLM classification)
+                        llm_client._temp_search_results = {
+                            "query": normalized_query,
+                            "candidates": chunks_all,
+                            "filters": filters
+                        }
+                        logger.debug(f"   Stored {len(chunks_all)} candidates temporarily (will finalize after LLM classification)")
+                    except Exception as exc:
+                        logger.error(f"Retrieval failed: {exc}")
+                        chunks = []
+                        
+            except Exception as exc:
+                logger.error(f"Intent detection failed: {exc}, assuming NEW_SEARCH")
+                # Fallback to standard retrieval
+                try:
+                    chunks_display, chunks_all = pipeline_state.retriever_client.retrieve(
+                        normalized_query,
+                        filters=filters,
+                        top_k=request.top_k,
+                        retrieve_for_refinement=True
+                    )
+                    chunks = chunks_display
+                    llm_client._temp_search_results = {
+                        "query": normalized_query,
+                        "candidates": chunks_all,
+                        "filters": filters
+                    }
+                except Exception as exc2:
+                    logger.error(f"Fallback retrieval failed: {exc2}")
+                    chunks = []
+        else:
+            # No search memory - this is definitely a new search
+            logger.debug(f"   No search memory - NEW SEARCH")
+            try:
+                chunks_display, chunks_all = pipeline_state.retriever_client.retrieve(
+                    normalized_query,
+                    filters=filters,
+                    top_k=request.top_k,
+                    retrieve_for_refinement=True  # Get extra candidates for future refinement
+                )
+                chunks = chunks_display
+                logger.debug(f"   Retrieved {len(chunks_display)} to display, {len(chunks_all)} to store")
+                
+                # CRITICAL FIX: Only store if this is a real entity search (not greeting/general)
+                # We'll let LLM decide after classification if we should store or not
+                # For now, store temporarily - will be cleared if not entity_search
+                llm_client._temp_search_results = {
+                    "query": normalized_query,
+                    "candidates": chunks_all,
+                    "filters": filters
+                }
+                logger.debug(f"   Stored {len(chunks_all)} candidates temporarily (will finalize after LLM classification)")
+            except Exception as exc:
+                logger.error(f"Retrieval failed: {exc}")
+                chunks = []
+                logger.debug("Continuing with empty chunks due to retrieval failure")
         
         # Use session-specific LLM client for chat - LLM determines if sources should be shown
         logger.debug(f"\n LLM PROCESSING:")
@@ -567,6 +638,15 @@ async def query_endpoint(request: QueryRequest, http_request: Request) -> QueryR
             logger.debug(f"   Answer Length: {len(answer)} characters")
             logger.debug(f"   Should Show Sources: {should_show_sources}")
             logger.debug(f"LLM processing successful - Sources shown: {should_show_sources}")
+            
+            # CRITICAL FIX: Check if refinement handler stored filtered chunks
+            if hasattr(llm_client, '_refinement_result_chunks'):
+                chunks = llm_client._refinement_result_chunks
+                logger.debug(f"   Using refinement result chunks: {len(chunks)} chunks")
+                delattr(llm_client, '_refinement_result_chunks')  # Clean up
+            else:
+                logger.debug(f"   Using original retrieval chunks: {len(chunks)} chunks")
+                
         except Exception as exc:
             logger.error(f"LLM processing failed: {exc}")
             # Provide fallback response

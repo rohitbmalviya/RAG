@@ -16,16 +16,48 @@ class Retriever:
         from .config import get_settings
         self._settings = get_settings()
 
-    def retrieve(self, query: str, filters: Optional[Dict[str, Any]] = None, top_k: Optional[int] = None) -> List[RetrievedChunk]:
+    def retrieve(
+        self, 
+        query: str, 
+        filters: Optional[Dict[str, Any]] = None, 
+        top_k: Optional[int] = None,
+        retrieve_for_refinement: bool = False
+    ) -> tuple[List[RetrievedChunk], List[RetrievedChunk]]:
+        """
+        Retrieve chunks with optional progressive refinement support (GENERIC).
+        
+        Args:
+            query: Search query
+            filters: Optional filters
+            top_k: Number of results to return to user
+            retrieve_for_refinement: If True, retrieve MORE candidates for future filtering
+        
+        Returns:
+            Tuple of (chunks_to_display, all_candidates_for_storage)
+        """
         self._logger.debug(f" RETRIEVER DEBUG:")
         self._logger.debug(f" Query: '{query}'")
         self._logger.debug(f" Raw filters: {filters}")
+        self._logger.debug(f" Retrieve for refinement: {retrieve_for_refinement}")
+        
         if top_k is None and (self._config.top_k in (None, 0)):
             self._logger.debug("Retrieval top_k not provided and config.top_k is missing/zero; defaulting to 5")
         k = top_k if top_k is not None else (self._config.top_k or 5)
+        
+        # ADAPTIVE STRATEGY: Retrieve more if this is initial search for refinement
+        if retrieve_for_refinement and not filters:
+            # Initial semantic search - get MORE candidates for progressive filtering
+            refinement_multiplier = getattr(self._config, 'refinement_multiplier', None) or 5
+            k_retrieve = k * refinement_multiplier
+            self._logger.debug(f" INITIAL SEARCH: Retrieving {k_retrieve} candidates (will show {k})")
+        else:
+            # Filtered search or no refinement needed
+            k_retrieve = k
+            self._logger.debug(f" STANDARD SEARCH: Retrieving {k_retrieve} candidates")
+        
         if self._config.num_candidates_multiplier in (None, 0):
             self._logger.debug("Retrieval num_candidates_multiplier is missing/zero; using 1x top_k")
-        num_candidates = k * max(1, self._config.num_candidates_multiplier or 1)
+        num_candidates = k_retrieve * max(1, self._config.num_candidates_multiplier or 1)
         query_vec = self._embedder.embed([query], task_type="retrieval_query")[0]
         
         # Apply prioritized context retrieval strategy
@@ -85,7 +117,13 @@ class Retriever:
             display_value = metadata.get(primary_field, "Unknown")
             price_value = metadata.get(pricing_field, "N/A") if pricing_field else "N/A"
             self._logger.debug(f" {i}. {display_value} | {currency} {price_value} | Score: {chunk.score:.3f}")
-        return chunks
+        
+        # Return tuple: (chunks_to_display, all_candidates_for_storage)
+        chunks_to_display = chunks[:k]
+        all_candidates = chunks[:k_retrieve]  # All chunks retrieved (for progressive filtering)
+        
+        self._logger.debug(f" Returning: {len(chunks_to_display)} to display, {len(all_candidates)} for storage")
+        return chunks_to_display, all_candidates
 
 # Removed complex scoring methods - now using simple boost approach
 

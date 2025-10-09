@@ -5,7 +5,7 @@ app:
   eager_init: false
 
 logging:
-  level: DEBUG  # DEBUG level for comprehensive logging (shows all logs)
+  level: DEBUG
 
 database:
   driver: postgres
@@ -350,6 +350,7 @@ vector_db:
 retrieval:
   top_k: 12 # Increased for better results
   num_candidates_multiplier: 8 # Reduced for speed while maintaining quality
+  refinement_multiplier: 5 # PROGRESSIVE REFINEMENT: Retrieve 5x candidates for client-side filtering (GENERIC)
   filter_fields:
     # Location filters
     - emirate

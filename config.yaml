@@ -416,6 +416,15 @@ llm:
   model: gemini-2.5-flash-lite
   temperature: 0.2
   max_output_tokens: 2048
+  
+  # Query handling - enable/disable features (NO hardcoded lists!)
+  query_handling:
+    use_llm_classification: true  # Let LLM classify queries using intelligence
+    enable_price_aggregation: true  # Enable average price calculations
+    enable_knowledge_search: true  # Enable web search for knowledge queries
+    enable_requirement_gathering: true  # Enable save requirements feature
+    enable_context_validation: true  # Enable response validation against chunks
+    validation_tolerance: 0.05  # 5% tolerance for numeric validation
 
 ingestion:
   batch_size: 500

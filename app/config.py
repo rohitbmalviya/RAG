@@ -232,12 +232,22 @@ class RetrievalConfig(BaseModel):
     filter_fields: List[str] = Field(default_factory=list)
     reranker: Optional[Dict[str, Any]] = None  
 
+class QueryHandlingConfig(BaseModel):
+    """LLM query handling configuration - enable/disable features without hardcoded lists."""
+    use_llm_classification: bool = True
+    enable_price_aggregation: bool = True
+    enable_knowledge_search: bool = True
+    enable_requirement_gathering: bool = True
+    enable_context_validation: bool = True
+    validation_tolerance: float = 0.05
+
 class LLMConfig(BaseModel):
     provider: Optional[str] = None
     model: Optional[str] = None
     temperature: Optional[float] = None
     max_output_tokens: Optional[int] = None
     requirement_gathering: Optional[RequirementGatheringConfig] = None
+    query_handling: Optional[QueryHandlingConfig] = Field(default_factory=QueryHandlingConfig)
 
 class IngestionConfig(BaseModel):
     batch_size: Optional[int] = None

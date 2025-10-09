@@ -415,7 +415,7 @@ async def on_startup() -> None:
                             "summary": "Average Price Query",
                             "description": "User asks for average rent statistics",
                             "value": {
-                                "answer": "Based on 45 properties in Dubai Marina:\n\n📊 **Price Statistics:**\n• **Average Annual Rent:** AED 125,000\n• **Median Annual Rent:** AED 120,000\n• **Price Range:** AED 85,000 - AED 180,000\n\nWould you like to see specific properties in this range?",
+                                "answer": "Based on 45 properties in Dubai Marina:\n\n**Price Statistics:**\n• **Average Annual Rent:** AED 125,000\n• **Median Annual Rent:** AED 120,000\n• **Price Range:** AED 85,000 - AED 180,000\n\nWould you like to see specific properties in this range?",
                                 "sources": []
                             }
                         },
@@ -510,11 +510,11 @@ async def query_endpoint(request: QueryRequest, http_request: Request) -> QueryR
         
         logger.info(f"Processing query: {request.query[:100]} | Session: {request.session_id} | Query ID: {query_id}")
         
-        print(f"\n🚀 QUERY ENDPOINT HIT:")
-        print(f"   Query ID: {query_id}")
-        print(f"   Session ID: {request.session_id}")
-        print(f"   Raw Query: '{request.query}'")
-        print(f"   Top K: {request.top_k}")
+        logger.debug(f"\n QUERY ENDPOINT HIT:")
+        logger.debug(f"   Query ID: {query_id}")
+        logger.debug(f"   Session ID: {request.session_id}")
+        logger.debug(f"   Raw Query: '{request.query}'")
+        logger.debug(f"   Top K: {request.top_k}")
         
         # FIXED: Use session_id properly
         session_id = request.session_id or "default"
@@ -522,17 +522,17 @@ async def query_endpoint(request: QueryRequest, http_request: Request) -> QueryR
         # Create/get session-specific LLM client with error handling
         try:
             llm_client = session_manager.get_or_create_session(session_id)
-            print(f"   LLM Client: {type(llm_client).__name__}")
+            logger.debug(f"   LLM Client: {type(llm_client).__name__}")
         except Exception as exc:
             logger.error(f"Failed to create/get session {session_id}: {exc}")
             raise HTTPException(status_code=500, detail="Failed to initialize conversation session")
         
         # CRITICAL: Use the session LLM client, not pipeline_state.llm_client
-        print(f"\n🔍 PREPROCESSING QUERY:")
+        logger.debug(f"\n PREPROCESSING QUERY:")
         try:
             normalized_query, filters = preprocess_query(request.query, llm_client)
-            print(f"   Normalized Query: '{normalized_query}'")
-            print(f"   Extracted Filters: {filters}")
+            logger.debug(f"   Normalized Query: '{normalized_query}'")
+            logger.debug(f"   Extracted Filters: {filters}")
             logger.debug(f"Query preprocessing successful - Filters: {filters}")
         except Exception as exc:
             logger.error(f"Query preprocessing failed: {exc}")
@@ -545,14 +545,14 @@ async def query_endpoint(request: QueryRequest, http_request: Request) -> QueryR
             llm_client._last_extracted_filters = filters
         
         # Retrieve chunks for property queries with error handling
-        print(f"\n📚 RETRIEVING CHUNKS:")
+        logger.debug(f"\n RETRIEVING CHUNKS:")
         try:
             chunks: List[RetrievedChunk] = pipeline_state.retriever_client.retrieve(
                 normalized_query,
                 filters=filters,
                 top_k=request.top_k,
             )
-            print(f"   Retrieved {len(chunks)} chunks")
+            logger.debug(f"   Retrieved {len(chunks)} chunks")
             logger.debug(f"Retrieval successful - {len(chunks)} chunks retrieved")
         except Exception as exc:
             logger.error(f"Retrieval failed: {exc}")
@@ -561,11 +561,11 @@ async def query_endpoint(request: QueryRequest, http_request: Request) -> QueryR
             logger.warning("Continuing with empty chunks due to retrieval failure")
         
         # Use session-specific LLM client for chat - LLM determines if sources should be shown
-        print(f"\n🤖 LLM PROCESSING:")
+        logger.debug(f"\n LLM PROCESSING:")
         try:
             answer, should_show_sources = llm_client.chat_with_source_decision(normalized_query, retrieved_chunks=chunks)
-            print(f"   Answer Length: {len(answer)} characters")
-            print(f"   Should Show Sources: {should_show_sources}")
+            logger.debug(f"   Answer Length: {len(answer)} characters")
+            logger.debug(f"   Should Show Sources: {should_show_sources}")
             logger.debug(f"LLM processing successful - Sources shown: {should_show_sources}")
         except Exception as exc:
             logger.error(f"LLM processing failed: {exc}")
@@ -579,12 +579,9 @@ async def query_endpoint(request: QueryRequest, http_request: Request) -> QueryR
         
         # Check if this is a requirement gathering request
         if "REQUIREMENT_GATHERING_DETECTED" in answer or "gather requirement" in normalized_query.lower() or "save my requirements" in normalized_query.lower():
-            print(f"   📝 REQUIREMENT GATHERING DETECTED IN QUERY!")
-            print(f"   Query: '{normalized_query}'")
-            print(f"   Answer contains requirement gathering: {'REQUIREMENT_GATHERING_DETECTED' in answer}")
-        
-        # Track search attempt for better conversation context
-        llm_client._track_search_attempt(normalized_query, filters, chunks)
+            logger.debug(f"    REQUIREMENT GATHERING DETECTED IN QUERY!")
+            logger.debug(f"   Query: '{normalized_query}'")
+            logger.debug(f"   Answer contains requirement gathering: {'REQUIREMENT_GATHERING_DETECTED' in answer}")
         
         # Filter sources based on LLM decision and extracted filters
         if should_show_sources:
@@ -593,16 +590,16 @@ async def query_endpoint(request: QueryRequest, http_request: Request) -> QueryR
             # Apply additional filtering based on extracted filters
             if filters:
                 filtered_chunks = _apply_filter_compliance(filtered_chunks, filters)
-                print(f"   Applied filter compliance, remaining chunks: {len(filtered_chunks)}")
+                logger.debug(f"   Applied filter compliance, remaining chunks: {len(filtered_chunks)}")
             
             sources: List[SourceItem] = [
                 SourceItem(score=c.score, text=c.text, metadata=c.metadata)
                 for c in filtered_chunks
             ]
-            print(f"   Final filtered sources: {len(sources)}")
+            logger.debug(f"   Final filtered sources: {len(sources)}")
         else:
             sources = []
-            print(f"   No sources shown (LLM decision)")
+            logger.debug(f"   No sources shown (LLM decision)")
         
         # Calculate processing time
         processing_time_ms = performance_monitor.end_timer(query_id)
@@ -620,10 +617,10 @@ async def query_endpoint(request: QueryRequest, http_request: Request) -> QueryR
         )
         metrics_collector.record_query(metrics)
         
-        print(f"\n✅ RESPONSE READY:")
-        print(f"   Answer: {answer[:100]}...")
-        print(f"   Sources Count: {len(sources)}")
-        print(f"   Processing Time: {processing_time_ms:.0f}ms")
+        logger.debug(f"\n RESPONSE READY:")
+        logger.debug(f"   Answer: {answer[:100]}...")
+        logger.debug(f"   Sources Count: {len(sources)}")
+        logger.debug(f"   Processing Time: {processing_time_ms:.0f}ms")
         
         return QueryResponse(answer=answer, sources=sources)
         
@@ -678,9 +675,9 @@ def _apply_filter_compliance(chunks: List[RetrievedChunk], filters: Dict[str, An
     settings = get_settings()
     field_types = settings.database.field_types or {}
     
-    print(f"\n🔍 STRICT FILTER COMPLIANCE CHECK:")
-    print(f"   Input chunks: {len(chunks)}")
-    print(f"   Filters to validate: {filters}")
+    logger.debug(f"\n STRICT FILTER COMPLIANCE CHECK:")
+    logger.debug(f"   Input chunks: {len(chunks)}")
+    logger.debug(f"   Filters to validate: {filters}")
     
     filtered_chunks = []
     
@@ -704,14 +701,14 @@ def _apply_filter_compliance(chunks: List[RetrievedChunk], filters: Dict[str, An
                 if isinstance(filter_value, list):
                     # Multiple acceptable values (OR logic)
                     if actual_value not in filter_value:
-                        print(f"   ❌ {property_title} - {filter_key} mismatch: {actual_value} not in {filter_value}")
+                        logger.debug(f"    {property_title} - {filter_key} mismatch: {actual_value} not in {filter_value}")
                         include_chunk = False
                 else:
                     # Single value (exact match, case-insensitive for keywords)
                     expected = str(filter_value).lower()
                     actual = str(actual_value).lower() if actual_value else ""
                     if actual != expected:
-                        print(f"   ❌ {property_title} - {filter_key} mismatch: {actual} != {expected}")
+                        logger.debug(f"    {property_title} - {filter_key} mismatch: {actual} != {expected}")
                         include_chunk = False
             
             # NUMERIC FILTERS (Integer/Float with range support)
@@ -721,28 +718,28 @@ def _apply_filter_compliance(chunks: List[RetrievedChunk], filters: Dict[str, An
                     actual_num = float(actual_value) if actual_value is not None else None
                     
                     if actual_num is None:
-                        print(f"   ❌ {property_title} - {filter_key} missing or None")
+                        logger.debug(f"    {property_title} - {filter_key} missing or None")
                         include_chunk = False
                     else:
                         # Check each range bound
                         if "gte" in filter_value and actual_num < filter_value["gte"]:
-                            print(f"   ❌ {property_title} - {filter_key} too low: {actual_num} < {filter_value['gte']}")
+                            logger.debug(f"    {property_title} - {filter_key} too low: {actual_num} < {filter_value['gte']}")
                             include_chunk = False
                         if "lte" in filter_value and actual_num > filter_value["lte"]:
-                            print(f"   ❌ {property_title} - {filter_key} too high: {actual_num} > {filter_value['lte']}")
+                            logger.debug(f"    {property_title} - {filter_key} too high: {actual_num} > {filter_value['lte']}")
                             include_chunk = False
                         if "gt" in filter_value and actual_num <= filter_value["gt"]:
-                            print(f"   ❌ {property_title} - {filter_key} not greater: {actual_num} <= {filter_value['gt']}")
+                            logger.debug(f"    {property_title} - {filter_key} not greater: {actual_num} <= {filter_value['gt']}")
                             include_chunk = False
                         if "lt" in filter_value and actual_num >= filter_value["lt"]:
-                            print(f"   ❌ {property_title} - {filter_key} not less: {actual_num} >= {filter_value['lt']}")
+                            logger.debug(f"    {property_title} - {filter_key} not less: {actual_num} >= {filter_value['lt']}")
                             include_chunk = False
                 else:
                     # Exact numeric match
                     expected_num = float(filter_value)
                     actual_num = float(actual_value) if actual_value is not None else None
                     if actual_num != expected_num:
-                        print(f"   ❌ {property_title} - {filter_key} mismatch: {actual_num} != {expected_num}")
+                        logger.debug(f"    {property_title} - {filter_key} mismatch: {actual_num} != {expected_num}")
                         include_chunk = False
             
             # BOOLEAN FILTERS (Amenities)
@@ -750,7 +747,7 @@ def _apply_filter_compliance(chunks: List[RetrievedChunk], filters: Dict[str, An
                 if filter_value is True:
                     # If filter requires True, actual must be True
                     if actual_value is not True:
-                        print(f"   ❌ {property_title} - {filter_key} not available: {actual_value}")
+                        logger.debug(f"    {property_title} - {filter_key} not available: {actual_value}")
                         include_chunk = False
                 # Note: We don't filter on False (user wants it, doesn't matter if property has it or not)
             
@@ -761,24 +758,24 @@ def _apply_filter_compliance(chunks: List[RetrievedChunk], filters: Dict[str, An
                     if "lte" in filter_value:
                         # available_from should be on or before filter date
                         if actual_value and actual_value > filter_value["lte"]:
-                            print(f"   ❌ {property_title} - {filter_key} too late: {actual_value} > {filter_value['lte']}")
+                            logger.debug(f"    {property_title} - {filter_key} too late: {actual_value} > {filter_value['lte']}")
                             include_chunk = False
                     if "gte" in filter_value:
                         # available_from should be on or after filter date
                         if actual_value and actual_value < filter_value["gte"]:
-                            print(f"   ❌ {property_title} - {filter_key} too early: {actual_value} < {filter_value['gte']}")
+                            logger.debug(f"    {property_title} - {filter_key} too early: {actual_value} < {filter_value['gte']}")
                             include_chunk = False
                 else:
                     # Exact date match
                     if actual_value != filter_value:
-                        print(f"   ❌ {property_title} - {filter_key} mismatch: {actual_value} != {filter_value}")
+                        logger.debug(f"    {property_title} - {filter_key} mismatch: {actual_value} != {filter_value}")
                         include_chunk = False
         
         if include_chunk:
             filtered_chunks.append(chunk)
-            print(f"   ✅ {property_title} - PASSES all filters")
+            logger.debug(f"    {property_title} - PASSES all filters")
     
-    print(f"   Final compliant chunks: {len(filtered_chunks)}/{len(chunks)}")
+    logger.debug(f"   Final compliant chunks: {len(filtered_chunks)}/{len(chunks)}")
     return filtered_chunks
 
 def _process_documents_to_vectors(documents: List[Any], settings: Settings) -> tuple[List[Any], List[List[float]]]:

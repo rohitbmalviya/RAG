@@ -2,7 +2,7 @@ from __future__ import annotations
 from typing import Dict, Tuple, Any, List
 import json
 from .llm import LLMClient
-from .config import get_settings
+from .config import get_settings, logger
 # Import instructions from centralized file
 from .instructions import LLM_FILTER_EXTRACTION_INSTRUCTIONS
 
@@ -129,9 +129,8 @@ def extract_filters_with_llm_context_aware(query: str, llm_client: LLMClient) ->
     LLM handles all extraction logic including number conversions and format handling.
     This function uses dynamic configuration and scales to any property schema.
     """
-    print(f"\n🔍 FILTER EXTRACTION DEBUG:")
-    print(f"   Query: '{query}'")
-    
+    logger.debug(f"\n FILTER EXTRACTION DEBUG:")
+    logger.debug(f" Query: '{query}'")
     settings = get_settings()
     allowed_fields = list(settings.retrieval.filter_fields or [])
     field_types = dict(settings.database.field_types or {})
@@ -140,48 +139,40 @@ def extract_filters_with_llm_context_aware(query: str, llm_client: LLMClient) ->
     conversation_context = _get_conversation_context(llm_client)
     user_preferences = _get_user_preferences(llm_client)
     
-    print(f"   Conversation context: '{conversation_context[:200]}...'")
-    print(f"   User preferences: {user_preferences}")
-    
+    logger.debug(f" Conversation context: '{conversation_context[:200]}...'")
+    logger.debug(f" User preferences: {user_preferences}")
     # Get existing filters from user preferences (stored from previous queries)
     existing_filters = user_preferences
-    print(f"   Existing filters from user preferences: {existing_filters}")
-    
+    logger.debug(f" Existing filters from user preferences: {existing_filters}")
     # Build dynamic prompt based on actual schema - LLM handles everything
     prompt = _build_dynamic_extraction_prompt(conversation_context, user_preferences, settings, query, existing_filters)
-    print(f"   Prompt length: {len(prompt)} characters")
-    print(f"   Prompt preview: {prompt[:300]}...")
-    
+    logger.debug(f" Prompt length: {len(prompt)} characters")
+    logger.debug(f" Prompt preview: {prompt[:300]}...")
     raw = llm_client.generate(prompt).strip()
-    print(f"   LLM raw response: '{raw}'")
-    
+    logger.debug(f" LLM raw response: '{raw}'")
     llm_data = _json_from_text(raw)
-    print(f"   Parsed JSON: {llm_data}")
-    
+    logger.debug(f" Parsed JSON: {llm_data}")
     # CRITICAL FIX: Merge with existing filters - new filters override existing ones
     # But preserve existing filters that are not overridden
     merged_filters = {**existing_filters, **llm_data}
-    print(f"   Merged filters: {merged_filters}")
-    
+    logger.debug(f" Merged filters: {merged_filters}")
     # DEBUG: Show what's being merged
-    print(f"   DEBUG MERGE:")
-    print(f"     Existing: {existing_filters}")
-    print(f"     New: {llm_data}")
-    print(f"     Final: {merged_filters}")
-    
+    logger.debug(f" DEBUG MERGE:")
+    logger.debug(f" Existing: {existing_filters}")
+    logger.debug(f" New: {llm_data}")
+    logger.debug(f" Final: {merged_filters}")
     # Process merged results with type coercion
     result = {}
     for key, value in merged_filters.items():
         if key not in allowed_fields:
-            print(f"   Skipping invalid field: {key}")
+            logger.debug(f" Skipping invalid field: {key}")
             continue
         ftype = field_types.get(key, "")
         normalized_value = _normalize_string_value(value, ftype, key)
         coerced = _coerce_value_by_type(normalized_value, ftype)
         if coerced is not None:
             result[key] = coerced
-            print(f"   Added filter: {key} = {coerced}")
-    
+            logger.debug(f" Added filter: {key} = {coerced}")
     # Filter to only allowed fields
     result = {k: v for k, v in result.items() if k in allowed_fields}
     
@@ -189,11 +180,10 @@ def extract_filters_with_llm_context_aware(query: str, llm_client: LLMClient) ->
     if hasattr(llm_client, 'conversation') and result:
         try:
             llm_client.conversation.update_preferences(result)
-            print(f"   Stored filters in conversation for next query")
+            logger.debug(f" Stored filters in conversation for next query")
         except Exception as e:
-            print(f"   Error storing filters: {e}")
-    
-    print(f"   Final filters: {result}")
+            logger.error(f" Error storing filters: {e}")
+    logger.debug(f" Final filters: {result}")
     return result
 
 def _get_conversation_context(llm_client: LLMClient) -> str:
@@ -219,7 +209,7 @@ def _get_conversation_context(llm_client: LLMClient) -> str:
             context_parts.append(f"Assistant: {content}")
     
     context = " | ".join(context_parts)
-    print(f"   Conversation context extracted: {len(context)} characters")
+    logger.debug(f" Conversation context extracted: {len(context)} characters")
     return context
 
 def _get_user_preferences(llm_client: LLMClient) -> Dict[str, Any]:
@@ -289,12 +279,11 @@ def _build_dynamic_extraction_prompt(conversation_context: str, user_preferences
         insert_pos = base_instructions.find("User query:")
         if insert_pos != -1:
             final_prompt = base_instructions[:insert_pos] + context_section + base_instructions[insert_pos:]
-            print(f"   Context section added: {len(context_section)} characters")
+            logger.debug(f" Context section added: {len(context_section)} characters")
             return final_prompt
         else:
-            print(f"   Warning: Could not find 'User query:' in prompt")
-    
-    print(f"   No context section added")
+            logger.warning(f" Warning: Could not find 'User query:' in prompt")
+    logger.debug(f" No context section added")
     return base_instructions
 
 def preprocess_query(query: str, llm_client: LLMClient) -> Tuple[str, Dict[str, Any]]:
@@ -310,8 +299,7 @@ def preprocess_query(query: str, llm_client: LLMClient) -> Tuple[str, Dict[str, 
     # Extract filters with conversation context - LLM handles everything intelligently
     filters = extract_filters_with_llm_context_aware(query, llm_client)
 
-    print("🔍 FILTER EXTRACTION DEBUG:")
-    print(f"   Query: '{query}'")
-    print(f"   Extracted filters: {filters}")
-    
+    logger.debug(" FILTER EXTRACTION DEBUG:")
+    logger.debug(f" Query: '{query}'")
+    logger.debug(f" Extracted filters: {filters}")
     return query, filters

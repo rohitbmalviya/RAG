@@ -193,12 +193,11 @@ class VectorStoreClient(BaseVectorStore):
         index = self._get_index_name()
         settings = get_settings()
         
-        print(f"🔍 VECTOR STORE SEARCH DEBUG:")
-        print(f"   Index: {index}")
-        print(f"   Top K: {top_k}")
-        print(f"   Num Candidates: {num_candidates}")
-        print(f"   Filters received: {filters}")
-        
+        self._logger.debug(f" VECTOR STORE SEARCH DEBUG:")
+        self._logger.debug(f" Index: {index}")
+        self._logger.debug(f" Top K: {top_k}")
+        self._logger.debug(f" Num Candidates: {num_candidates}")
+        self._logger.debug(f" Filters received: {filters}")
         knn = {
             "field": "embedding",
             "query_vector": query_vector,
@@ -210,17 +209,15 @@ class VectorStoreClient(BaseVectorStore):
         
         if filters:
             allowed = set(settings.retrieval.filter_fields or [])
-            print(f"   Allowed filter fields: {sorted(list(allowed))}")
-            
+            self._logger.debug(f" Allowed filter fields: {sorted(list(allowed))}")
             for key, value in filters.items():
                 if key not in allowed or value is None:
-                    print(f"   Skipping filter {key}: not allowed or None")
+                    self._logger.debug(f" Skipping filter {key}: not allowed or None")
                     continue
                 
                 # Use consistent field mapping - all filters go to metadata unless specified otherwise
                 filter_key = f"metadata.{key}"
-                print(f"   Processing filter: {key} = {value} -> {filter_key}")
-                
+                self._logger.debug(f" Processing filter: {key} = {value} -> {filter_key}")
                 if isinstance(value, dict):
                     # Handle range queries (gte, lte, gt, lt)
                     range_clause: Dict[str, Any] = {"range": {filter_key: {}}}
@@ -229,22 +226,20 @@ class VectorStoreClient(BaseVectorStore):
                             range_clause["range"][filter_key][bound] = value[bound]
                     if range_clause["range"][filter_key]:
                         filter_clauses.append(range_clause)
-                        print(f"   Added range filter: {range_clause}")
+                        self._logger.debug(f" Added range filter: {range_clause}")
                 elif isinstance(value, list):
                     # Handle multiple values
                     filter_clauses.append({"terms": {filter_key: value}})
-                    print(f"   Added terms filter: {filter_key} in {value}")
+                    self._logger.debug(f" Added terms filter: {filter_key} in {value}")
                 else:
                     # Handle single value
                     filter_clauses.append({"term": {filter_key: value}})
-                    print(f"   Added term filter: {filter_key} = {value}")
-        
+                    self._logger.debug(f" Added term filter: {filter_key} = {value}")
         if filter_clauses:
             es_query["query"] = {"bool": {"filter": filter_clauses}}
-            print(f"   Final ES query with filters: {es_query}")
+            self._logger.debug(f" Final ES query with filters: {es_query}")
         else:
-            print(f"   No filters applied, using KNN only")
-        
+            self._logger.debug(f" No filters applied, using KNN only")
         try:
             resp = self._client.search(index=index, body=es_query, _source=True)
         except Exception as exc:
@@ -252,8 +247,7 @@ class VectorStoreClient(BaseVectorStore):
             raise
         
         hits = resp.get("hits", {}).get("hits", [])
-        print(f"   Raw hits count: {len(hits)}")
-        
+        self._logger.debug(f" Raw hits count: {len(hits)}")
         # Debug: Show details for first few hits (GENERIC - uses config!)
         primary_field = settings.database.primary_display_field
         for i, hit in enumerate(hits[:5], 1):
@@ -261,8 +255,7 @@ class VectorStoreClient(BaseVectorStore):
             metadata = source.get("metadata", {})
             display_value = metadata.get(primary_field, "Unknown")
             doc_id = metadata.get("id", "N/A")
-            print(f"   Hit {i}: {display_value} (ID: {doc_id})")
-        
+            self._logger.debug(f" Hit {i}: {display_value} (ID: {doc_id})")
         return hits
 
     def delete_by_source_id(self, source_id: str) -> int:
@@ -302,11 +295,10 @@ class VectorStoreClient(BaseVectorStore):
         
         pricing_field_path = f"metadata.{pricing_field}"
         
-        print(f"\n💰 AVERAGE PRICE CALCULATION:")
-        print(f"   Index: {index}")
-        print(f"   Pricing field: {pricing_field}")
-        print(f"   Filters: {filters}")
-        
+        self._logger.debug(f"\n AVERAGE PRICE CALCULATION:")
+        self._logger.debug(f" Index: {index}")
+        self._logger.debug(f" Pricing field: {pricing_field}")
+        self._logger.debug(f" Filters: {filters}")
         # Build query with filters (GENERIC - uses configured pricing_field!)
         es_query: Dict[str, Any] = {
             "size": 0,  # We only want aggregations, not documents
@@ -337,17 +329,15 @@ class VectorStoreClient(BaseVectorStore):
         filter_clauses: List[Dict[str, Any]] = []
         if filters:
             allowed = set(settings.retrieval.filter_fields or [])
-            print(f"   Allowed filter fields: {sorted(list(allowed))}")
-            
+            self._logger.debug(f" Allowed filter fields: {sorted(list(allowed))}")
             for key, value in filters.items():
                 if key not in allowed or value is None:
-                    print(f"   Skipping filter {key}: not allowed or None")
+                    self._logger.debug(f" Skipping filter {key}: not allowed or None")
                     continue
                 
                 # Use consistent field mapping
                 filter_key = f"metadata.{key}"
-                print(f"   Processing filter: {key} = {value} -> {filter_key}")
-                
+                self._logger.debug(f" Processing filter: {key} = {value} -> {filter_key}")
                 if isinstance(value, dict):
                     # Handle range queries
                     range_clause: Dict[str, Any] = {"range": {filter_key: {}}}
@@ -356,23 +346,21 @@ class VectorStoreClient(BaseVectorStore):
                             range_clause["range"][filter_key][bound] = value[bound]
                     if range_clause["range"][filter_key]:
                         filter_clauses.append(range_clause)
-                        print(f"   Added range filter: {range_clause}")
+                        self._logger.debug(f" Added range filter: {range_clause}")
                 elif isinstance(value, list):
                     # Handle multiple values
                     filter_clauses.append({"terms": {filter_key: value}})
-                    print(f"   Added terms filter: {filter_key} in {value}")
+                    self._logger.debug(f" Added terms filter: {filter_key} in {value}")
                 else:
                     # Handle single value
                     filter_clauses.append({"term": {filter_key: value}})
-                    print(f"   Added term filter: {filter_key} = {value}")
-        
+                    self._logger.debug(f" Added term filter: {filter_key} = {value}")
         if filter_clauses:
             es_query["query"]["bool"]["filter"] = filter_clauses
-            print(f"   Final ES query with filters: {es_query}")
-        
+            self._logger.debug(f" Final ES query with filters: {es_query}")
         try:
             resp = self._client.search(index=index, body=es_query)
-            print(f"   Aggregation response received")
+            self._logger.debug(f" Aggregation response received")
         except Exception as exc:
             self._logger.error("Elasticsearch aggregation failed: %s", exc)
             raise
@@ -392,14 +380,13 @@ class VectorStoreClient(BaseVectorStore):
             "filters_applied": filters or {}
         }
         
-        print(f"   📊 AVERAGE PRICE RESULTS:")
-        print(f"      Average: AED {result['average']:,}")
-        print(f"      Median: AED {result['median']:,}")
-        print(f"      Min: AED {result['min']:,}")
-        print(f"      Max: AED {result['max']:,}")
-        print(f"      Count: {result['count']} properties")
-        print(f"      Location: {result['location_context']}")
-        
+        self._logger.debug(f" AVERAGE PRICE RESULTS:")
+        self._logger.debug(f" Average: AED {result['average']:,}")
+        self._logger.debug(f" Median: AED {result['median']:,}")
+        self._logger.debug(f" Min: AED {result['min']:,}")
+        self._logger.debug(f" Max: AED {result['max']:,}")
+        self._logger.debug(f" Count: {result['count']} properties")
+        self._logger.debug(f" Location: {result['location_context']}")
         return result
     
     def _extract_location_context(self, filters: Dict[str, Any]) -> str:

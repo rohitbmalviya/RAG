@@ -796,3 +796,135 @@ Example for E-Commerce:
 ═══════════════════════════════════════════════════════════════════════════════
 """
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 9: GENERIC LLM-DRIVEN QUERY CLASSIFICATION
+# Purpose: Let LLM classify queries using intelligence - NO hardcoded keywords!
+# Usage: Used by classify_query() function
+# ═══════════════════════════════════════════════════════════════════════════════
+
+GENERIC_QUERY_CLASSIFICATION_TEMPLATE = """
+You are analyzing a user query in the context of a {entity_name} search system.
+
+USER QUERY: "{user_input}"
+
+Classify this query into ONE of these categories:
+
+1. **entity_search** - User is searching for specific {entity_name}
+   Examples: "find 3 bedroom apartment", "show me red cars", "software engineer jobs", "cheap laptops"
+
+2. **price_inquiry** - User is asking about average/typical pricing or metrics
+   Examples: "what's the average {pricing_field}", "how much do {entity_name} typically cost", "price range"
+
+3. **knowledge_inquiry** - User is asking for definitions, explanations, or general knowledge
+   Examples: "what is a studio apartment", "what does AWD mean", "explain remote work", "tell me about OLED"
+
+4. **requirement_gathering** - User wants to save their requirements for later notification
+   Examples: "save my preferences", "notify me when available", "remember my requirements"
+
+5. **general_conversation** - Greetings, thanks, general chat
+   Examples: "hello", "thank you", "how are you", "goodbye"
+
+Return JSON only (no additional text):
+{{
+  "category": "entity_search|price_inquiry|knowledge_inquiry|requirement_gathering|general_conversation",
+  "confidence": 0.9,
+  "reasoning": "Brief explanation of why you chose this category"
+}}
+"""
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 10: GENERIC CONTEXT VALIDATION
+# Purpose: Let LLM validate responses against actual data - NO hardcoded location lists!
+# Usage: Used by validate_response_context() function
+# ═══════════════════════════════════════════════════════════════════════════════
+
+GENERIC_CONTEXT_VALIDATION_TEMPLATE = """
+You are validating an AI assistant's response against actual database results.
+
+ASSISTANT'S ANSWER:
+{answer}
+
+ACTUAL DATA FROM DATABASE:
+{chunk_summary}
+
+Your task is to check if the assistant's answer is factually accurate:
+
+1. **Entity mentions**: Does the answer mention items that appear in the actual data?
+2. **Numeric accuracy**: Do numeric values (prices, counts, measurements) match the actual data?
+   - Allow ±{tolerance}% tolerance for rounding
+3. **Identifiers**: Are names, locations, or identifiers mentioned in the answer present in the actual data?
+
+If the answer contains information NOT found in the actual data (hallucination), flag it.
+
+Return JSON only (no additional text):
+{{
+  "valid": true|false,
+  "issues": ["List any specific issues found", "e.g., Price mismatch: claimed $500 but actual is $450"],
+  "hallucinated_info": ["List any hallucinated information"],
+  "confidence": 0.9
+}}
+"""
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 11: GENERIC REQUIREMENT FIELD EXTRACTION
+# Purpose: Let LLM determine what's missing - NO hardcoded required field lists!
+# Usage: Used by _check_required_fields() function
+# ═══════════════════════════════════════════════════════════════════════════════
+
+GENERIC_REQUIREMENT_EXTRACTION_TEMPLATE = """
+You are helping gather search requirements for a {entity_name} search system.
+
+CURRENT REQUIREMENTS EXTRACTED FROM CONVERSATION:
+{current_requirements}
+
+Your task is to determine what ESSENTIAL information is still missing for a successful search.
+
+For a {entity_name} search, common essential fields typically include:
+- **Location/Region**: Where to search (if applicable)
+- **Type/Category**: What kind of {entity_name[:-1]} they want
+- **Budget/Price range**: Their budget or price preferences
+- **Key specifications**: Important features or filters specific to {entity_name}
+
+Analyze the current requirements and identify what's missing.
+
+Return JSON only (no additional text):
+{{
+  "missing_fields": ["field1", "field2"],
+  "field_descriptions": {{
+    "field1": "Human-readable description of what this field is",
+    "field2": "Human-readable description of what this field is"
+  }},
+  "questions_to_ask": ["What location are you looking in?", "What's your budget range?"],
+  "priority": "high|medium|low"
+}}
+
+If all essential information is present, return:
+{{
+  "missing_fields": [],
+  "field_descriptions": {{}},
+  "questions_to_ask": [],
+  "priority": "none"
+}}
+"""
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# NOTES FOR NEW DEVELOPERS:
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# THESE GENERIC TEMPLATES (SECTION 9-11) ARE SPECIAL:
+# - They use placeholders like {entity_name}, {pricing_field}, {tolerance}
+# - These placeholders are filled from config.yaml at runtime
+# - They work for ANY domain (properties, cars, jobs, products, etc.)
+# - NO domain-specific keywords hardcoded!
+# - The LLM uses its intelligence to classify and validate
+#
+# TO USE FOR DIFFERENT DATASOURCES:
+# 1. Update config.yaml:
+#    - database.table (e.g., "cars", "jobs", "products")
+#    - database.pricing_field (e.g., "price", "salary")
+#    - database.primary_display_field (e.g., "car_name", "job_title")
+#
+# 2. That's it! These templates automatically adapt!
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+

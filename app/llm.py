@@ -177,9 +177,6 @@ class Conversation:
 
 LLM_PROVIDERS: Dict[str, Type["BaseLLMProvider"]] = {}
 
-# All constants imported from instructions.py - NO DUPLICATES!
-
-
 def _extract_json_from_response(response: str, expected_type: str = "object") -> Any:
     """Centralized JSON extraction with error handling"""
     try:
@@ -309,21 +306,12 @@ class DynamicQueryClassifier:
         return self._fallback_classification(query)
     
     def _fallback_classification(self, query: str) -> Dict[str, Any]:
-        """Fallback classification using simple patterns"""
-        query_lower = query.lower().strip()
-
-        if any(word in query_lower for word in ["hi", "hello", "hey", "good morning", "good afternoon"]):
-            return {"category": "greeting", "confidence": 0.7, "reasoning": "Contains greeting words"}
-        elif any(word in query_lower for word in ["what is", "define", "explain", "meaning of"]):
-            return {"category": "general_knowledge", "confidence": 0.7, "reasoning": "Asking for definition/explanation"}
-        elif any(word in query_lower for word in ["best", "top", "premium", "featured"]):
-            return {"category": "best_property", "confidence": 0.7, "reasoning": "Asking for best/top properties"}
-        elif any(word in query_lower for word in ["average", "typical", "mean"]) and any(word in query_lower for word in ["price", "rent", "cost"]):
-            return {"category": "average_price", "confidence": 0.7, "reasoning": "Asking for average pricing"}
-        elif query_lower in ["1", "2", "yes", "no", "option 1", "option 2"]:
-            return {"category": "conversation_response", "confidence": 0.9, "reasoning": "Simple response to conversation flow"}
-        else:
-            return {"category": "property_search", "confidence": 0.5, "reasoning": "Default to property search"}
+        """Simple fallback if LLM fails - returns safe default, NO hardcoded keywords!"""
+        return {
+            "category": "property_search", 
+            "confidence": 0.3, 
+            "reasoning": "LLM classification unavailable, defaulting to entity search"
+        }
 
 class DynamicAlternativesGenerator:
     """Dynamic LLM-based alternatives generation"""
@@ -441,7 +429,6 @@ class DynamicResponseGenerator:
         """Fallback response if LLM fails"""
         return FALLBACK_GENERAL_RESPONSE
 
-
 class LLMClient(BaseLLM):
     def __init__(self, config: LLMConfig, api_key: Optional[str]) -> None:
         self._logger = get_logger(__name__)
@@ -455,152 +442,218 @@ class LLMClient(BaseLLM):
         self.requirement_metrics = RequirementGatheringMetrics()
         self.conversation.add_message("system", COMPLETE_SYSTEM_PROMPT)
 
+    def classify_query(self, user_input: str) -> Dict[str, Any]:
+        """LLM-based query classification - NO hardcoded keywords!
+        
+        Uses LLM intelligence to classify queries based on minimal config context.
+        Works for ANY domain (properties, cars, jobs, products, etc.)
+        
+        Returns:
+            Dict with keys: category, confidence, reasoning
+        """
+        from .config import get_settings
+        from .instructions import GENERIC_QUERY_CLASSIFICATION_TEMPLATE
+        
+        settings = get_settings()
+        
+        # Get minimal context from config (generic!)
+        entity_name = settings.database.table  # "properties", "cars", "jobs", etc.
+        pricing_field = settings.database.pricing_field  # "rent_charge", "price", "salary", etc.
+        
+        # Build classification prompt using generic template
+        classification_prompt = GENERIC_QUERY_CLASSIFICATION_TEMPLATE.format(
+            entity_name=entity_name,
+            user_input=user_input,
+            pricing_field=pricing_field
+        )
+        
+        try:
+            # Let LLM classify using its intelligence (NO hardcoded keywords!)
+            response = self._safe_generate([{"role": "user", "content": classification_prompt}])
+            result = _extract_json_from_response(response, "object")
+            
+            if result and "category" in result:
+                self._logger.debug(f" LLM Classification: {result['category']} (confidence: {result.get('confidence', 'N/A')})")
+                self._logger.debug(f" Reasoning: {result.get('reasoning', 'N/A')}")
+                return result
+        except Exception as e:
+            self._logger.warning(f"LLM classification failed: {e}, using fallback")
+        
+        # Fallback: simple pattern matching if LLM fails
+        return self._fallback_classification(user_input)
+    
+    def _fallback_classification(self, user_input: str) -> Dict[str, Any]:
+        """Simple fallback if LLM fails - returns safe default, NO hardcoded keywords!"""
+        return {
+            "category": "entity_search", 
+            "confidence": 0.3, 
+            "reasoning": "LLM classification unavailable, defaulting to entity search"
+        }
+
+    def validate_response_context(self, answer: str, retrieved_chunks: List[RetrievedChunk]) -> str:
+        """LLM-based context validation - NO hardcoded location lists!
+        
+        Uses LLM to validate responses against actual retrieved chunks.
+        Works for ANY domain (properties, cars, jobs, products, etc.)
+        
+        Args:
+            answer: The generated response to validate
+            retrieved_chunks: The chunks retrieved from database
+        
+        Returns:
+            Validated answer (possibly with disclaimer if issues found)
+        """
+        from .config import get_settings
+        from .instructions import GENERIC_CONTEXT_VALIDATION_TEMPLATE
+        
+        settings = get_settings()
+        
+        # Check if validation is enabled
+        if not settings.llm.query_handling.enable_context_validation:
+            return answer  # Validation disabled
+        
+        if not retrieved_chunks:
+            # No chunks to validate against - check if answer mentions entities
+            if any(keyword in answer.lower() for keyword in [settings.database.table[:-1], "available", "found"]):
+                # Answer claims to have results but there are no chunks
+                return (
+                    "I apologize, but I couldn't find any specific items matching your criteria in our database. "
+                    "Would you like to adjust your search filters or save your requirements for later notification?"
+                )
+            return answer
+        
+        # Summarize chunks for validation (generic!)
+        chunk_summary = self._summarize_chunks_for_validation(retrieved_chunks)
+        tolerance = settings.llm.query_handling.validation_tolerance * 100  # Convert to percentage
+        
+        # Build validation prompt using generic template
+        validation_prompt = GENERIC_CONTEXT_VALIDATION_TEMPLATE.format(
+            answer=answer,
+            chunk_summary=chunk_summary,
+            tolerance=tolerance
+        )
+        
+        try:
+            # Let LLM validate using its intelligence (NO hardcoded checks!)
+            response = self._safe_generate([{"role": "user", "content": validation_prompt}])
+            result = _extract_json_from_response(response, "object")
+            
+            if result:
+                is_valid = result.get("valid", True)
+                issues = result.get("issues", [])
+                
+                if not is_valid and issues:
+                    self._logger.warning(f" LLM Validation: Issues found - {len(issues)} problems")
+                    for issue in issues[:3]:  # Show top 3 issues
+                        self._logger.warning(f" - {issue}")
+                    # Add disclaimer to response
+                    answer += "\n\n*Please verify details directly with the listing for accuracy.*"
+                else:
+                    self._logger.debug(f" LLM Validation: Response is accurate")
+        except Exception as e:
+            self._logger.warning(f"LLM validation failed: {e}")
+        
+        return answer
+    
+    def _summarize_chunks_for_validation(self, chunks: List[RetrievedChunk]) -> str:
+        """Summarize chunks for validation (generic!)"""
+        from .config import get_settings
+        settings = get_settings()
+        
+        pricing_field = settings.database.pricing_field
+        display_field = settings.database.primary_display_field
+        currency = settings.database.display.currency
+        
+        summary = []
+        for i, chunk in enumerate(chunks[:10], 1):  # Top 10 chunks
+            metadata = chunk.metadata
+            title = metadata.get(display_field, "Item")
+            price = metadata.get(pricing_field, "N/A")
+            
+            if price != "N/A" and isinstance(price, (int, float)):
+                summary.append(f"[{i}] {title} - {currency} {price:,.0f}")
+            else:
+                summary.append(f"[{i}] {title} - {price}")
+        
+        return "\n".join(summary)
+
     def chat(self, user_input: str, retrieved_chunks: Optional[List[RetrievedChunk]] = None) -> str:
         """Process user query using pure LLM intelligence - no hardcoded conditions.""" 
         answer, _ = self.chat_with_source_decision(user_input, retrieved_chunks)
         return answer
 
     def chat_with_source_decision(self, user_input: str, retrieved_chunks: Optional[List[RetrievedChunk]] = None) -> tuple[str, bool]:
-        """Process user query using pure LLM intelligence - no hardcoded conditions."""
+        """Process user query using LLM-driven classification - NO hardcoded conditions!
+        
+        Uses LLM intelligence to classify queries and handle them appropriately.
+        Works for ANY domain (properties, cars, jobs, products, etc.)
+        """
         user_input = user_input.strip()
+        
+        from .config import get_settings
+        settings = get_settings()
 
-        print(f"\n🤖 LLM DEBUG:")
-        print(f"   User input: '{user_input}'")
-        print(f"   Conversation history: '{self._get_conversation_context()[:200]}...'")
-        print(f"   User preferences: {self.conversation.get_preferences()}")
-        print(f"   Has property data: {bool(retrieved_chunks)}")
-        print(f"   Retrieved chunks count: {len(retrieved_chunks) if retrieved_chunks else 0}")
+        self._logger.debug(f"\n LLM DEBUG:")
+        self._logger.debug(f" User input: '{user_input}'")
+        self._logger.debug(f" Conversation history: '{self._get_conversation_context()[:200]}...'")
+        self._logger.debug(f" User preferences: {self.conversation.get_preferences()}")
+        self._logger.debug(f" Has data: {bool(retrieved_chunks)}")
+        self._logger.debug(f" Retrieved chunks count: {len(retrieved_chunks) if retrieved_chunks else 0}")
+        # Use LLM to classify query (NO hardcoded keywords!)
+        classification = self.classify_query(user_input)
+        category = classification.get("category", "entity_search")
+        confidence = classification.get("confidence", 0.5)
         
-        # Check if this is an average price query BEFORE processing with LLM
-        if self._is_average_price_query(user_input):
-            print(f"   💰 AVERAGE PRICE QUERY DETECTED!")
+        self._logger.debug(f" Query Category: {category} (confidence: {confidence})")
+        # Handle special query types based on LLM classification
+        if category == "price_inquiry" and settings.llm.query_handling.enable_price_aggregation:
+            self._logger.debug(f" PRICE INQUIRY DETECTED!")
             answer = self._handle_average_price_query(user_input)
-            print(f"   ✅ AVERAGE PRICE CALCULATION COMPLETED!")
+            self._logger.info(f" PRICE CALCULATION COMPLETED!")
             self._add_conversation_messages(user_input, answer)
-            return answer, False  # No sources for average price queries
+            return answer, False  # No sources for price queries
         
-        # Check if this is a general knowledge query BEFORE processing with LLM
-        if self._is_general_knowledge_query(user_input):
-            print(f"   📚 GENERAL KNOWLEDGE QUERY DETECTED!")
+        elif category == "knowledge_inquiry" and settings.llm.query_handling.enable_knowledge_search:
+            self._logger.debug(f" KNOWLEDGE INQUIRY DETECTED!")
             answer = self._handle_general_knowledge_query(user_input)
-            print(f"   ✅ GENERAL KNOWLEDGE QUERY COMPLETED!")
+            self._logger.info(f" KNOWLEDGE QUERY COMPLETED!")
             self._add_conversation_messages(user_input, answer)
-            return answer, False  # No sources for general knowledge queries
+            return answer, False  # No sources for knowledge queries
         
-        # Check if this is a requirement gathering request BEFORE processing with LLM
-        if self._is_requirement_gathering_request(user_input):
-            print(f"   📝 REQUIREMENT GATHERING REQUEST DETECTED!")
-            print(f"   🚀 CALLING gather_requirements_and_send() METHOD...")
+        elif category == "requirement_gathering" and settings.llm.query_handling.enable_requirement_gathering:
+            self._logger.debug(f" REQUIREMENT GATHERING DETECTED!")
+            self._logger.debug(f" CALLING gather_requirements_and_send() METHOD...")
             answer = self.gather_requirements_and_send(user_input, ask_confirmation=False)
-            print(f"   ✅ REQUIREMENT GATHERING COMPLETED!")
+            self._logger.info(f" REQUIREMENT GATHERING COMPLETED!")
             self._add_conversation_messages(user_input, answer)
             return answer, False
         
+        elif category == "general_conversation":
+            # Handle greetings and general conversation
+            self._logger.debug(f" GENERAL CONVERSATION DETECTED!")
+            context = self._build_comprehensive_context(user_input, retrieved_chunks)
+            llm_response = self._get_llm_intelligent_response(context)
+            answer, _ = self._parse_llm_response(llm_response)
+            self._add_conversation_messages(user_input, answer)
+            return answer, False  # No sources for greetings
+        
+        # Default: entity_search - process with full LLM intelligence
+        self._logger.debug(f" ENTITY SEARCH - Processing with LLM intelligence...")
         context = self._build_comprehensive_context(user_input, retrieved_chunks)
         llm_response = self._get_llm_intelligent_response(context)
         answer, should_show_sources = self._parse_llm_response(llm_response)
-        print(f"   LLM Response: {llm_response[:200]}...")
-        print(f"   Parsed Answer: {answer[:100]}...")
-        print(f"   Should Show Sources: {should_show_sources}")
         
-        # CRITICAL: Enforce context-bound responses for property queries
+        self._logger.debug(f" LLM Response: {llm_response[:200]}...")
+        self._logger.debug(f" Parsed Answer: {answer[:100]}...")
+        self._logger.debug(f" Should Show Sources: {should_show_sources}")
+        # Validate response context using LLM (NO hardcoded checks!)
         if should_show_sources and retrieved_chunks:
-            answer = self._enforce_context_bound_response(answer, retrieved_chunks, user_input)
+            answer = self.validate_response_context(answer, retrieved_chunks)
         
         self._add_conversation_messages(user_input, answer)
 
         return answer, should_show_sources
 
-    def _enforce_context_bound_response(self, answer: str, retrieved_chunks: List[RetrievedChunk], user_query: str) -> str:
-        """HARD enforcement: Ensure LLM only uses data from retrieved chunks.
-        
-        This validates:
-        1. Property details (rent, bedrooms, location) match retrieved chunks
-        2. No hallucinated property names or features
-        3. Numeric values (rent, size) come from actual chunks
-        """
-        print(f"\n🛡️ CONTEXT-BOUND ENFORCEMENT:")
-        print(f"   Checking answer against {len(retrieved_chunks)} retrieved chunks")
-        
-        # Extract property IDs from retrieved chunks
-        valid_property_ids = set()
-        valid_property_titles = set()
-        valid_rent_charges = set()
-        valid_locations = set()
-        
-        for chunk in retrieved_chunks:
-            metadata = chunk.metadata
-            prop_id = metadata.get("id")
-            prop_title = metadata.get("property_title")
-            rent_charge = metadata.get("rent_charge")
-            emirate = metadata.get("emirate")
-            community = metadata.get("community")
-            
-            if prop_id:
-                valid_property_ids.add(str(prop_id))
-            if prop_title:
-                valid_property_titles.add(prop_title.lower())
-            if rent_charge:
-                valid_rent_charges.add(float(rent_charge))
-            if emirate:
-                valid_locations.add(emirate.lower())
-            if community:
-                valid_locations.add(community.lower())
-        
-        print(f"   Valid properties: {len(valid_property_titles)} titles, {len(valid_rent_charges)} rent values")
-        
-        # Check for hallucination patterns
-        answer_lower = answer.lower()
-        
-        # Pattern 1: Check if answer mentions rent values not in chunks
-        import re
-        rent_pattern = r'aed\s*([\d,]+(?:\.\d+)?)'
-        mentioned_rents = re.findall(rent_pattern, answer_lower)
-        
-        hallucinated_rents = []
-        for rent_str in mentioned_rents:
-            try:
-                rent_value = float(rent_str.replace(',', ''))
-                # Allow ±5% tolerance for rounding
-                is_valid = any(abs(rent_value - valid_rent) / valid_rent < 0.05 for valid_rent in valid_rent_charges)
-                if not is_valid:
-                    hallucinated_rents.append(rent_value)
-            except ValueError:
-                pass
-        
-        if hallucinated_rents:
-            print(f"   ⚠️ WARNING: Hallucinated rent values detected: {hallucinated_rents}")
-            print(f"   Valid rents were: {valid_rent_charges}")
-            
-            # Add disclaimer to response
-            answer += "\n\n*Note: Please verify property details directly with the listing for accuracy.*"
-        
-        # Pattern 2: If no chunks but answer mentions specific properties, flag it
-        if not retrieved_chunks and any(keyword in answer_lower for keyword in ["property", "apartment", "villa", "aed"]):
-            print(f"   ❌ CRITICAL: LLM mentioned properties with NO retrieved chunks!")
-            # Override with safe response
-            return (
-                "I apologize, but I couldn't find any specific properties matching your criteria in our database. "
-                "Would you like to:\n"
-                "1. Adjust your search criteria (location, budget, property type)\n"
-                "2. Save your requirements so our team can find matching properties for you\n\n"
-                "What would you prefer?"
-            )
-        
-        # Pattern 3: Check if answer mentions locations not in chunks
-        mentioned_locations = []
-        for location in ["dubai marina", "downtown dubai", "palm jumeirah", "jbr", "business bay", 
-                        "dubai hills", "arabian ranches", "emirates hills", "jlt", "jvc"]:
-            if location in answer_lower:
-                mentioned_locations.append(location)
-        
-        invalid_locations = [loc for loc in mentioned_locations if loc not in valid_locations]
-        if invalid_locations and valid_locations:
-            print(f"   ⚠️ WARNING: Mentioned locations not in chunks: {invalid_locations}")
-            print(f"   Valid locations were: {valid_locations}")
-        
-        print(f"   ✅ Context enforcement completed")
-        return answer
     
     def _build_comprehensive_context(self, user_input: str, retrieved_chunks: Optional[List[RetrievedChunk]] = None) -> Dict[str, Any]:
         """Build comprehensive context for LLM decision making."""
@@ -620,48 +673,11 @@ class LLMClient(BaseLLM):
         
         return bool(retrieved_chunks)
 
-    def _is_general_knowledge_query(self, user_input: str) -> bool:
-        """Check if user input is asking for general knowledge/definitions."""
-        user_input_lower = user_input.lower().strip()
-        
-        # Check for general knowledge keywords
-        knowledge_keywords = [
-            "what is", "what's", "what are",
-            "define", "definition of", "meaning of",
-            "explain", "explanation of", "tell me about",
-            "what does", "what do", "how does",
-            "what's the difference between", "difference between"
-        ]
-        
-        # Property-related terms that might need definitions
-        property_terms = [
-            "apartment", "villa", "studio", "penthouse", "townhouse", "duplex",
-            "furnished", "semi-furnished", "unfurnished",
-            "holiday home", "ready rent", "management fees",
-            "lease", "leasing", "rent", "rental", "tenancy",
-            "emirate", "community", "subcommunity",
-            "ejari", "makani", "dewa", "chiller",
-            "service charge", "maintenance", "security deposit"
-        ]
-        
-        # Check if query contains knowledge keywords
-        has_knowledge_keyword = any(keyword in user_input_lower for keyword in knowledge_keywords)
-        
-        # Check if query contains property terms
-        has_property_term = any(term in user_input_lower for term in property_terms)
-        
-        # General knowledge query if it has both knowledge keyword and property term
-        if has_knowledge_keyword and has_property_term:
-            print(f"   📚 MATCHED GENERAL KNOWLEDGE PATTERN")
-            return True
-        
-        return False
     
     def _handle_general_knowledge_query(self, user_input: str) -> str:
         """Handle general knowledge queries using web search."""
-        print(f"\n📚 HANDLING GENERAL KNOWLEDGE QUERY:")
-        print(f"   Query: '{user_input}'")
-        
+        self._logger.debug(f"\n HANDLING GENERAL KNOWLEDGE QUERY:")
+        self._logger.debug(f" Query: '{user_input}'")
         try:
             # Use web search to get current information
             from .utils import search_web_for_property_knowledge
@@ -675,7 +691,7 @@ class LLMClient(BaseLLM):
             # Build response using web search results
             response = self._build_knowledge_response(user_input, search_results)
             
-            print(f"   ✅ Generated general knowledge response with web search")
+            self._logger.debug(f" Generated general knowledge response with web search")
             return response
             
         except Exception as e:
@@ -706,37 +722,14 @@ class LLMClient(BaseLLM):
         except Exception:
             return self._generate_llm_knowledge_response(query)
     
-    def _is_average_price_query(self, user_input: str) -> bool:
-        """Check if user input is asking for average prices."""
-        user_input_lower = user_input.lower().strip()
-        
-        # Check for average price keywords
-        average_keywords = [
-            "average price", "average rent", "average cost",
-            "typical price", "typical rent", "typical cost",
-            "mean price", "mean rent", "mean cost",
-            "average annual rent", "average yearly rent",
-            "what's the average", "what is the average",
-            "how much is the average", "tell me the average",
-            "average pricing", "typical pricing"
-        ]
-        
-        for keyword in average_keywords:
-            if keyword in user_input_lower:
-                print(f"   💰 MATCHED AVERAGE PRICE KEYWORD: '{keyword}'")
-                return True
-        
-        return False
     
     def _handle_average_price_query(self, user_input: str) -> str:
         """Handle average price queries by calculating from database."""
-        print(f"\n💰 HANDLING AVERAGE PRICE QUERY:")
-        print(f"   Query: '{user_input}'")
-        
+        self._logger.debug(f"\n HANDLING AVERAGE PRICE QUERY:")
+        self._logger.debug(f" Query: '{user_input}'")
         # Get filters from user preferences (location, property type, etc.)
         filters = self.conversation.get_preferences().copy()
-        print(f"   Using filters from conversation: {filters}")
-        
+        self._logger.debug(f" Using filters from conversation: {filters}")
         # Get vector store client from pipeline_state
         try:
             from .main import pipeline_state
@@ -764,7 +757,7 @@ class LLMClient(BaseLLM):
             
             # Build response with context
             response = f"Based on {count} properties currently listed in {location}:\n\n"
-            response += f"📊 **Price Statistics:**\n"
+            response += f"**Price Statistics:**\n"
             response += f"• **Average Annual Rent:** AED {average:,.0f}\n"
             response += f"• **Median Annual Rent:** AED {median:,.0f}\n"
             response += f"• **Price Range:** AED {min_price:,.0f} - AED {max_price:,.0f}\n\n"
@@ -784,7 +777,7 @@ class LLMClient(BaseLLM):
             
             response += "Would you like to see specific properties in this price range, or adjust your search criteria?"
             
-            print(f"   ✅ Generated average price response")
+            self._logger.debug(f" Generated average price response")
             return response
             
         except Exception as e:
@@ -794,60 +787,6 @@ class LLMClient(BaseLLM):
                 "Let me help you search for specific properties instead. What are you looking for?"
             )
 
-    def _is_requirement_gathering_request(self, user_input: str) -> bool:
-        """Check if user input is requesting requirement gathering."""
-        user_input_lower = user_input.lower().strip()
-        
-        # Check for explicit requirement gathering phrases
-        requirement_phrases = [
-            "gather information",
-            "gather requirement", 
-            "gather requirements",
-            "save my requirements",
-            "save requirements",
-            "collect my needs",
-            "collect requirements",
-            "save my needs",
-            "gather my needs",
-            "save for team",
-            "send to team",
-            "notify when available",
-            "find matching properties",
-            "work with agencies"
-        ]
-        
-        # Check if any phrase matches
-        for phrase in requirement_phrases:
-            if phrase in user_input_lower:
-                print(f"   📝 MATCHED REQUIREMENT PHRASE: '{phrase}'")
-                return True
-        
-        # Check for partial matches and typos
-        if "save" in user_input_lower and any(word in user_input_lower for word in ["requirement", "requriement", "requirment", "requirment"]):
-            print(f"   📝 MATCHED SAVE REQUIREMENT (with typo): '{user_input_lower}'")
-            return True
-        
-        # Check for simple confirmations to requirement gathering
-        if user_input_lower in ["yes", "y", "ok", "okay", "sure", "go ahead", "do it", "save it"]:
-            # Check if the last assistant message was about requirement gathering
-            messages = self.conversation.get_messages()
-            if messages and len(messages) >= 2:
-                last_assistant_msg = messages[-1]["content"].lower()
-                if any(phrase in last_assistant_msg for phrase in ["save your requirements", "gather your requirements", "send to our team"]):
-                    print(f"   📝 CONFIRMATION TO REQUIREMENT GATHERING: '{user_input_lower}'")
-                    return True
-        
-        # NEW: Check if user is providing missing requirement information
-        # This happens when the last assistant message was asking for missing requirements
-        messages = self.conversation.get_messages()
-        if messages and len(messages) >= 2:
-            last_assistant_msg = messages[-1]["content"].lower()
-            if "what i know so far" in last_assistant_msg and "i still need to know" in last_assistant_msg:
-                # User is responding to a requirement gathering request
-                print(f"   📝 USER PROVIDING MISSING REQUIREMENT INFO: '{user_input_lower}'")
-                return True
-        
-        return False
 
     def _get_llm_intelligent_response(self, context: Dict[str, Any]) -> str:
         """Get intelligent response from LLM with all decision making."""
@@ -856,13 +795,11 @@ class LLMClient(BaseLLM):
         
         try:
             response = self._safe_generate([{"role": "user", "content": prompt}])
-            print(f"   LLM Response: {response[:200]}...")
-            
+            self._logger.debug(f" LLM Response: {response[:200]}...")
             # Check if response contains requirement gathering triggers
             if any(trigger in response.lower() for trigger in ["gather requirement", "save your requirements", "collect your needs"]):
-                print(f"   📝 REQUIREMENT GATHERING TRIGGER DETECTED IN LLM RESPONSE!")
-                print(f"   Response preview: {response[:300]}...")
-            
+                self._logger.debug(f" REQUIREMENT GATHERING TRIGGER DETECTED IN LLM RESPONSE!")
+                self._logger.debug(f" Response preview: {response[:300]}...")
             return response 
         except Exception as e:
             self._logger.error(f"LLM intelligent response failed: {e}")
@@ -877,13 +814,12 @@ class LLMClient(BaseLLM):
         conversation_history = context.get("conversation_history", "")
         user_preferences = context.get("user_preferences", {})
         
-        print(f"🤖 LLM DEBUG:")
-        print(f"   User input: '{user_input}'")
-        print(f"   Conversation history: '{conversation_history}'")
-        print(f"   User preferences: {user_preferences}")
-        print(f"   Has property data: {context['has_property_data']}")
-        print(f"   Retrieved chunks count: {len(retrieved_chunks)}")
-        
+        self._logger.debug(f" LLM DEBUG:")
+        self._logger.debug(f" User input: '{user_input}'")
+        self._logger.debug(f" Conversation history: '{conversation_history}'")
+        self._logger.debug(f" User preferences: {user_preferences}")
+        self._logger.debug(f" Has property data: {context['has_property_data']}")
+        self._logger.debug(f" Retrieved chunks count: {len(retrieved_chunks)}")
         # Build context sections
         conversation_context = ""
         if conversation_history:
@@ -911,8 +847,7 @@ class LLMClient(BaseLLM):
                 metadata = chunk.metadata
                 display_value = metadata.get(primary_field, "Unknown")
                 price_value = metadata.get(pricing_field, "N/A") if pricing_field else "N/A"
-                print(f"      Property {i}: {display_value} | {price_value}")
-        
+                self._logger.debug(f" Property {i}: {display_value} | {price_value}")
         # Use centralized template - NO DUPLICATES!
         prompt = INTELLIGENT_DECISION_PROMPT_TEMPLATE.format(
             user_input=user_input,
@@ -936,9 +871,8 @@ class LLMClient(BaseLLM):
                 
                 # Check for requirement gathering detection
                 if "REQUIREMENT_GATHERING_DETECTED" in reasoning:
-                    print(f"   📝 REQUIREMENT GATHERING DETECTED IN LLM REASONING!")
-                    print(f"   Reasoning: {reasoning}")
-                
+                    self._logger.debug(f" REQUIREMENT GATHERING DETECTED IN LLM REASONING!")
+                    self._logger.debug(f" Reasoning: {reasoning}")
                 self._logger.debug(f"LLM decision: show_sources={show_sources}, reasoning={reasoning}")
                 return answer, show_sources
             
@@ -948,11 +882,19 @@ class LLMClient(BaseLLM):
         return llm_response, self._intelligent_source_guess(llm_response)
 
     def _intelligent_source_guess(self, response: str) -> bool:
-        """Make intelligent guess about showing sources based on response content."""
+        """Make intelligent guess about showing sources (fallback when LLM parsing fails)."""
+        from .config import get_settings
+        settings = get_settings()
+        
         response_lower = response.lower()
+        entity_name = settings.database.table[:-1]  # "properties" → "property"
+        currency = settings.database.display.currency.lower()
+        
+        # Generic patterns that indicate entity listings
         if any(phrase in response_lower for phrase in [
-            "here are", "i found", "available properties", "matching properties",
-            "property details", "rent charge", "aed", "bedroom", "apartment", "villa"
+            "here are", "i found", f"available {settings.database.table}", 
+            f"matching {settings.database.table}", f"{entity_name} details",
+            currency  # currency mentioned usually means showing listings
         ]):
             return True
         if any(phrase in response_lower for phrase in [
@@ -970,16 +912,6 @@ class LLMClient(BaseLLM):
             return f"I found some properties that might interest you. Let me show you the details."
         else:
             return f"I'd be happy to help you find properties in the UAE. Could you tell me more about what you're looking for?"
-
-    def _build_context_from_chunks(self, retrieved_chunks: List[RetrievedChunk]) -> str:
-        """Build context block from retrieved chunks (shared utility)"""
-        context_lines: List[str] = []
-        for idx, chunk in enumerate(retrieved_chunks, start=1):
-            context_lines.append(f"[Source {idx}]")
-            if chunk.text:
-                context_lines.append(chunk.text)
-            context_lines.append("")
-        return "\n".join(context_lines)
 
     def _get_conversation_context(self) -> str:
         """Get recent conversation history for short-term memory"""
@@ -999,48 +931,6 @@ class LLMClient(BaseLLM):
             context_parts.append(f"User Preferences: {preferences}")
             
         return " | ".join(context_parts)
-
-    def _handle_no_results(self, user_input: str, preferences: Dict[str, Any]) -> str:
-        """Handle cases where no properties are found - with context checking and requirement gathering"""
-        
-        print(f"\n📝 NO RESULTS HANDLER - OFFERING REQUIREMENT GATHERING:")
-        print(f"   User input: '{user_input}'")
-        print(f"   Preferences: {preferences}")
-        
-        retriever_client = pipeline_state.retriever_client if pipeline_state else None
-        verified_alternatives = self._get_verified_alternatives(preferences, retriever_client)
-        response = (
-            f"I understand you're looking for a property, but unfortunately I couldn't find exact matches for your criteria in our current listings.\n\n"
-            f"Let me help you in two ways:\n\n"
-        )
-        
-        if verified_alternatives:
-            response += "**1. 🔍 Try alternate searches** (I've verified these options exist in our database):\n"
-            for i, alt in enumerate(verified_alternatives[:3], 1):
-                response += f"   {i}. {alt['suggestion']} ({alt['count']} properties available)\n"
-                if 'sample_properties' in alt and alt['sample_properties']:
-                    sample = alt['sample_properties'][0]
-                    response += f"      Example: {sample['title']} - {sample['rent']}\n"
-            response += "\nWould you like me to show you properties for any of these alternatives?\n\n"
-        else:
-            response += "**1. 🔍 Expand search criteria**: I can help you adjust your requirements to find similar properties.\n\n"
-        
-        response += (
-            "**2. 📝 Save your requirements**: I can gather what you're looking for and send it to our team. "
-            "They'll work with agencies to source properties that match your needs and notify you when available.\n\n"
-            "Which option would you prefer? Type '1' for alternatives or '2' to save your requirements, "
-            "or just tell me what you'd like to do next."
-        )
-        
-        return response
-
-
-    def _get_verified_alternatives(self, preferences: Dict[str, Any], retriever) -> List[Dict[str, Any]]:
-        """Generate dynamic alternatives using LLM reasoning and database verification"""
-        if not retriever:
-            return []
-        alternatives_generator = DynamicAlternativesGenerator(self._provider_client)
-        return alternatives_generator.generate_verified_alternatives(preferences, retriever)
 
     def _summarize_conversation_context(self) -> str:
         """Summarize conversation for requirement gathering"""
@@ -1076,68 +966,95 @@ class LLMClient(BaseLLM):
         user_messages = [msg["content"] for msg in messages if msg["role"] == "user"]
         combined_query = " ".join(user_messages)
         
-        print(f"   🔍 EXTRACTING DETAILED REQUIREMENTS FROM CONVERSATION:")
-        print(f"   Combined user messages: {combined_query[:300]}...")
-        
+        self._logger.debug(f" EXTRACTING DETAILED REQUIREMENTS FROM CONVERSATION:")
+        self._logger.debug(f" Combined user messages: {combined_query[:300]}...")
         # Use centralized template - NO DUPLICATES!
         extraction_prompt = REQUIREMENT_EXTRACTION_PROMPT.format(combined_query=combined_query)
 
         try:
             response = self._safe_generate([{"role": "user", "content": extraction_prompt}])
-            print(f"   LLM extraction response: {response[:200]}...")
-            
+            self._logger.debug(f" LLM extraction response: {response[:200]}...")
             # Parse JSON response
             json_match = re.search(r'\{.*\}', response, re.DOTALL)
             if json_match:
                 extracted_requirements = json.loads(json_match.group(0))
-                print(f"   Successfully extracted: {extracted_requirements}")
+                self._logger.info(f" Successfully extracted: {extracted_requirements}")
                 return extracted_requirements
         except Exception as e:
-            print(f"   Error extracting requirements: {e}")
-        
+            self._logger.error(f" Error extracting requirements: {e}")
         return {}
 
     def _check_required_fields(self, extracted_requirements: Dict[str, Any]) -> List[str]:
-        """Check which required fields are missing from extracted requirements"""
-        # Get required fields from config or use default priority fields
-        required_fields = getattr(self._config.requirement_gathering, 'priority_fields', [
-            'location', 'property_type_name', 'number_of_bedrooms', 'rent_charge', 'furnishing_status'
-        ])
+        """LLM-based missing field detection - NO hardcoded required fields list!
         
-        # Filter out optional fields (marked with # optional in config)
-        # For now, we'll consider amenities and lease_duration as optional
-        optional_fields = ['amenities', 'lease_duration']
-        mandatory_fields = [field for field in required_fields if field not in optional_fields]
+        Uses LLM to determine what essential information is missing.
+        Works for ANY domain (properties, cars, jobs, products, etc.)
+        """
+        from .config import get_settings
+        from .instructions import GENERIC_REQUIREMENT_EXTRACTION_TEMPLATE
         
-        missing_fields = []
-        for field in mandatory_fields:
-            # Handle field mapping - location can be emirate, city, or community
-            field_found = False
-            if field == 'location':
-                # Check for location in various forms
-                location_fields = ['location', 'emirate', 'city', 'community']
-                for loc_field in location_fields:
-                    if loc_field in extracted_requirements and extracted_requirements[loc_field]:
-                        field_found = True
-                        break
-            else:
-                # Check the exact field
-                if field in extracted_requirements and extracted_requirements[field]:
-                    field_found = True
+        settings = get_settings()
+        
+        # Check if requirement gathering is enabled
+        if not settings.llm.query_handling.enable_requirement_gathering:
+            return []  # Feature disabled
+        
+        # Get minimal context from config (generic!)
+        entity_name = settings.database.table  # "properties", "cars", "jobs", etc.
+        
+        # Build requirement extraction prompt using generic template
+        current_requirements_str = json.dumps(extracted_requirements, indent=2) if extracted_requirements else "{}"
+        
+        extraction_prompt = GENERIC_REQUIREMENT_EXTRACTION_TEMPLATE.format(
+            entity_name=entity_name,
+            current_requirements=current_requirements_str
+        )
+        
+        try:
+            # Let LLM determine what's missing using its intelligence!
+            response = self._safe_generate([{"role": "user", "content": extraction_prompt}])
+            result = _extract_json_from_response(response, "object")
             
-            if not field_found:
-                missing_fields.append(field)
+            if result:
+                missing_fields = result.get("missing_fields", [])
+                questions = result.get("questions_to_ask", [])
+                priority = result.get("priority", "unknown")
+                
+                self._logger.debug(f" LLM Missing Field Detection:")
+                self._logger.debug(f" Missing fields: {missing_fields}")
+                self._logger.debug(f" Priority: {priority}")
+                if questions:
+                    self._logger.debug(f"Questions to ask: {questions[:2]}")
+                
+                return missing_fields
+        except Exception as e:
+            self._logger.warning(f"LLM missing field detection failed: {e}, using fallback")
         
-        print(f"   Required fields: {required_fields}")
-        print(f"   Mandatory fields: {mandatory_fields}")
-        print(f"   Optional fields: {optional_fields}")
-        print(f"   Missing fields: {missing_fields}")
-        return missing_fields
+        # Fallback: simple check for basic fields if LLM fails
+        return self._fallback_missing_fields_check(extracted_requirements)
+    
+    def _fallback_missing_fields_check(self, requirements: Dict[str, Any]) -> List[str]:
+        """Simple fallback missing field check if LLM fails"""
+        from .config import get_settings
+        settings = get_settings()
+        
+        missing = []
+        
+        # Check for location (any location field)
+        location_fields = settings.database.location_hierarchy if settings.database.location_hierarchy else ['location']
+        has_location = any(requirements.get(field) for field in location_fields)
+        if not has_location:
+            missing.append('location')
+        
+        # Check for pricing field
+        if not requirements.get(settings.database.pricing_field):
+            missing.append(settings.database.pricing_field)
+        
+        return missing
 
     def _ask_for_missing_requirements(self, missing_fields: List[str], extracted_requirements: Dict[str, Any]) -> str:
         """Ask user to provide missing required fields"""
-        print(f"   📝 ASKING FOR MISSING REQUIREMENTS: {missing_fields}")
-        
+        self._logger.debug(f" ASKING FOR MISSING REQUIREMENTS: {missing_fields}")
         # Build response acknowledging what we have and asking for missing info
         response = "Perfect! I'd like to gather all the details for you. Let me ask a few quick questions to get everything we need:\n\n"
         
@@ -1177,27 +1094,22 @@ class LLMClient(BaseLLM):
 
     def gather_requirements_and_send(self, user_input: str, ask_confirmation: bool = True) -> str:
         """Gather requirements and optionally send to endpoint"""
-        print(f"\n📝 REQUIREMENT GATHERING TRIGGERED:")
-        print(f"   User input: '{user_input}'")
-        print(f"   Ask confirmation: {ask_confirmation}")
-        print(f"   Session ID: {str(id(self.conversation))}")
-        
+        self._logger.debug(f"\n REQUIREMENT GATHERING TRIGGERED:")
+        self._logger.debug(f" User input: '{user_input}'")
+        self._logger.debug(f" Ask confirmation: {ask_confirmation}")
+        self._logger.debug(f" Session ID: {str(id(self.conversation))}")
         # Extract detailed requirements from conversation
         extracted_requirements = self._extract_detailed_requirements_from_conversation()
-        print(f"   Extracted requirements: {extracted_requirements}")
-        
+        self._logger.debug(f" Extracted requirements: {extracted_requirements}")
         # Merge with conversation preferences (which contain emirate, etc.)
         preferences = self.conversation.get_preferences()
-        print(f"   Conversation preferences: {preferences}")
-        
+        self._logger.debug(f" Conversation preferences: {preferences}")
         # Merge extracted requirements with preferences, giving priority to extracted
         merged_requirements = {**preferences, **extracted_requirements}
-        print(f"   Merged requirements: {merged_requirements}")
-        
+        self._logger.debug(f" Merged requirements: {merged_requirements}")
         # Check if we have sufficient data to send to endpoint
         missing_fields = self._check_required_fields(merged_requirements)
-        print(f"   Missing required fields: {missing_fields}")
-        
+        self._logger.debug(f" Missing required fields: {missing_fields}")
         if missing_fields:
             # Ask user to provide missing data
             return self._ask_for_missing_requirements(missing_fields, merged_requirements)
@@ -1212,9 +1124,8 @@ class LLMClient(BaseLLM):
             "timestamp": time.time()
         }
         
-        print(f"   User preferences: {preferences}")
-        print(f"   Conversation summary: {conversation_summary[:200]}...")
-        
+        self._logger.debug(f" User preferences: {preferences}")
+        self._logger.debug(f" Conversation summary: {conversation_summary[:200]}...")
         if ask_confirmation:
             response = (
                 "I'll summarize what you're looking for:\n\n"
@@ -1237,7 +1148,7 @@ class LLMClient(BaseLLM):
             
             return response
         else:
-            print(f"   Sending requirements directly to endpoint (no confirmation needed)")
+            self._logger.debug(f" Sending requirements directly to endpoint (no confirmation needed)")
             return self._send_requirements_to_endpoint(requirement_summary)
     
     def _send_requirements_to_endpoint(self, requirements: Dict[str, Any]) -> str:
@@ -1261,10 +1172,9 @@ class LLMClient(BaseLLM):
         
         endpoint = self._config.requirement_gathering.endpoint or "http://localhost:5000/backend/api/v1/user/requirement"
         
-        print(f"\n🚀 SENDING REQUIREMENTS TO API ENDPOINT:")
-        print(f"   Endpoint: {endpoint}")
-        print(f"   Requirements data: {requirements}")
-
+        self._logger.debug(f"\n SENDING REQUIREMENTS TO API ENDPOINT:")
+        self._logger.debug(f" Endpoint: {endpoint}")
+        self._logger.debug(f" Requirements data: {requirements}")
         # Transform the data to match backend controller expectations
         extracted_requirements = requirements.get("extracted_requirements", {})
         preferences = requirements.get("preferences", {})
@@ -1299,23 +1209,21 @@ class LLMClient(BaseLLM):
         # Remove None values to keep payload clean
         backend_payload = {k: v for k, v in backend_payload.items() if v is not None}
         
-        print(f"   🔄 TRANSFORMED PAYLOAD FOR BACKEND:")
-        print(f"      Original extracted_requirements: {extracted_requirements}")
-        print(f"      Original preferences: {preferences}")
-        print(f"      Merged data: {merged_data}")
-        print(f"      Backend payload: {backend_payload}")
-        print(f"      Payload size: {len(str(backend_payload))} bytes")
-        
+        self._logger.debug(f" 🔄 TRANSFORMED PAYLOAD FOR BACKEND:")
+        self._logger.debug(f" Original extracted_requirements: {extracted_requirements}")
+        self._logger.debug(f" Original preferences: {preferences}")
+        self._logger.debug(f" Merged data: {merged_data}")
+        self._logger.debug(f" Backend payload: {backend_payload}")
+        self._logger.debug(f" Payload size: {len(str(backend_payload))} bytes")
         enhanced_requirements = backend_payload
         retry_attempts = 3
         retry_delay = 2
         
         for attempt in range(retry_attempts):
             try:
-                print(f"   📤 API CALL ATTEMPT {attempt + 1}/{retry_attempts}:")
-                print(f"      URL: {endpoint}")
-                print(f"      Payload: {enhanced_requirements}")
-                
+                self._logger.debug(f" 📤 API CALL ATTEMPT {attempt + 1}/{retry_attempts}:")
+                self._logger.debug(f" URL: {endpoint}")
+                self._logger.debug(f" Payload: {enhanced_requirements}")
                 self._logger.info(f"Sending requirements to endpoint: {endpoint} (attempt {attempt + 1}/{retry_attempts})")
                 response = requests.post(
                     endpoint,
@@ -1324,12 +1232,12 @@ class LLMClient(BaseLLM):
                     headers={"Content-Type": "application/json"}
                 )
                 
-                print(f"      Response Status: {response.status_code}")
-                print(f"      Response Headers: {dict(response.headers)}")
+                self._logger.debug(f" Response Status: {response.status_code}")
+                self._logger.debug(f" Response Headers: {dict(response.headers)}")
                 if response.text:
-                    print(f"      Response Body: {response.text[:500]}...")
+                    self._logger.debug(f" Response Body: {response.text[:500]}...")
                 if response.status_code == 200:
-                    print(f"      ✅ SUCCESS: Requirements sent successfully!")
+                    self._logger.info(f" SUCCESS: Requirements sent successfully!")
                     self.conversation.set_requirement_gathered(True)
                     self.requirement_metrics.log_attempt(True)
                     self._logger.info("Requirements successfully sent to endpoint")
@@ -1339,13 +1247,13 @@ class LLMClient(BaseLLM):
                         "Is there anything else I can help you with today?"
                     )
                 elif attempt < retry_attempts - 1:
-                    print(f"      ⚠️  RETRY: Status {response.status_code}, retrying in {retry_delay}s")
+                    self._logger.debug(f" RETRY: Status {response.status_code}, retrying in {retry_delay}s")
                     self._logger.warning(f"Endpoint returned status {response.status_code}, retrying in {retry_delay}s")
                     time.sleep(retry_delay)
                     retry_delay *= 2  
                     continue
                 else:
-                    print(f"      ❌ FAILED: Status {response.status_code} after {retry_attempts} attempts")
+                    self._logger.error(f" FAILED: Status {response.status_code} after {retry_attempts} attempts")
                     self._logger.warning(f"Endpoint returned status {response.status_code} after {retry_attempts} attempts")
                     self._save_to_fallback_storage(enhanced_requirements)
                     self.requirement_metrics.log_attempt(False)
@@ -1357,13 +1265,13 @@ class LLMClient(BaseLLM):
                     
             except requests.exceptions.Timeout:
                 if attempt < retry_attempts - 1:
-                    print(f"      ⏰ TIMEOUT: Retrying in {retry_delay}s")
+                    self._logger.debug(f" ⏰ TIMEOUT: Retrying in {retry_delay}s")
                     self._logger.warning(f"Request timeout, retrying in {retry_delay}s")
                     time.sleep(retry_delay)
                     retry_delay *= 2
                     continue
                 else:
-                    print(f"      ❌ TIMEOUT FAILED: After all retry attempts")
+                    self._logger.error(f" TIMEOUT FAILED: After all retry attempts")
                     self._logger.error("Request timeout after all retry attempts")
                     self._save_to_fallback_storage(enhanced_requirements)
                     self.requirement_metrics.log_attempt(False)
@@ -1374,13 +1282,13 @@ class LLMClient(BaseLLM):
                     )
             except Exception as e:
                 if attempt < retry_attempts - 1:
-                    print(f"      ⚠️  ERROR: {e}, retrying in {retry_delay}s")
+                    self._logger.error(f" ERROR: {e}, retrying in {retry_delay}s")
                     self._logger.warning(f"Request failed: {e}, retrying in {retry_delay}s")
                     time.sleep(retry_delay)
                     retry_delay *= 2
                     continue
                 else:
-                    print(f"      ❌ ERROR FAILED: {e} after {retry_attempts} attempts")
+                    self._logger.error(f" ERROR FAILED: {e} after {retry_attempts} attempts")
                     self._logger.error(f"Failed to send requirements to endpoint after {retry_attempts} attempts: {e}")
                     self._save_to_fallback_storage(enhanced_requirements)
                     self.requirement_metrics.log_attempt(False)
@@ -1485,25 +1393,6 @@ class LLMClient(BaseLLM):
         self.conversation.add_message("user", user_input)
         self.conversation.add_message("assistant", response)
 
-    def _track_search_attempt(self, query: str, filters: Dict[str, Any], chunks: List[RetrievedChunk]) -> None:
-        """Track search attempts for better conversation context"""
-        results_count = len(chunks) if chunks else 0
-        self.conversation.add_search_attempt(query, filters, results_count)
-
-    def _get_enhanced_conversation_context(self) -> str:
-        """Get enhanced conversation context including search history and alternatives"""
-        context_parts = []
-        basic_context = self._get_conversation_context()
-        if basic_context:
-            context_parts.append(basic_context)
-        search_context = self.conversation.get_search_context()
-        if search_context:
-            context_parts.append(search_context)
-        alternatives_context = self.conversation.get_alternatives_context()
-        if alternatives_context:
-            context_parts.append(alternatives_context)
-        return " | ".join(context_parts)
-
     def _safe_generate(self, messages: List[Dict[str, str]], retries: int = 2, delay: int = 1) -> str:
         """Call provider safely with retry logic."""
         for attempt in range(retries + 1):
@@ -1515,54 +1404,3 @@ class LLMClient(BaseLLM):
                     time.sleep(delay)
                 else:
                     return "I'm sorry, I couldn't process your request right now."
-
-    def _get_conversation_summary_for_endpoint(self) -> str:
-        """Get detailed conversation summary for endpoint"""
-        messages = self.conversation.get_messages()
-        if not messages:
-            return "No conversation history"
-        user_messages = [msg["content"] for msg in messages if msg["role"] == "user"]
-        assistant_messages = [msg["content"] for msg in messages if msg["role"] == "assistant"]
-        summary_parts = []
-        summary_parts.append(f"User queries: {'; '.join(user_messages[-5:])}")  
-        summary_parts.append(f"Assistant responses: {'; '.join(assistant_messages[-3:])}")
-        return " | ".join(summary_parts)
-
-    def _get_search_attempts_summary(self) -> List[Dict[str, Any]]:
-        """Get summary of search attempts made during conversation"""
-        search_attempts = []
-        messages = self.conversation.get_messages()
-        for msg in messages:
-            if msg["role"] == "user" and any(keyword in msg["content"].lower() for keyword in ["find", "search", "show", "list", "get"]):
-                search_attempts.append({
-                    "query": msg["content"],
-                    "timestamp": time.time()
-                })
-        return search_attempts[-5:]  
-
-    def _get_alternatives_summary(self) -> List[Dict[str, Any]]:
-        """Get summary of alternatives suggested during conversation"""  
-        return []
-
-    def _build_context_and_prompt(self, user_input: str, retrieved_chunks: List[RetrievedChunk]) -> str:
-        """Build context prompt with conversation memory and user preferences"""
-        conversation_history = self._get_conversation_context()
-        user_preferences = self.conversation.get_preferences()
-        context_block = self._build_context_from_chunks(retrieved_chunks)
-        memory_section = ""
-        if conversation_history:
-            memory_section = f"\n\nCONVERSATION HISTORY:\n{conversation_history}"
-        preferences_section = ""
-        if user_preferences:
-            pref_items = []
-            for key, value in user_preferences.items():
-                if isinstance(value, dict) and "lte" in value:
-                    pref_items.append(f"{key}: up to {value['lte']}")
-                elif isinstance(value, dict) and "gte" in value:
-                    pref_items.append(f"{key}: at least {value['gte']}")
-                else:
-                    pref_items.append(f"{key}: {value}")
-            if pref_items:
-                preferences_section = f"\n\nUSER PREFERENCES: {', '.join(pref_items)}"
-        prompt = f"User question:\n{user_input}{memory_section}{preferences_section}\n\nProperty Context:\n{context_block}\n\nResponse:"
-        return prompt

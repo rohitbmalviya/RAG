@@ -17,10 +17,9 @@ class Retriever:
         self._settings = get_settings()
 
     def retrieve(self, query: str, filters: Optional[Dict[str, Any]] = None, top_k: Optional[int] = None) -> List[RetrievedChunk]:
-        print(f"🔍 RETRIEVER DEBUG:")
-        print(f"   Query: '{query}'")
-        print(f"   Raw filters: {filters}")
-        
+        self._logger.debug(f" RETRIEVER DEBUG:")
+        self._logger.debug(f" Query: '{query}'")
+        self._logger.debug(f" Raw filters: {filters}")
         if top_k is None and (self._config.top_k in (None, 0)):
             self._logger.warning("Retrieval top_k not provided and config.top_k is missing/zero; defaulting to 5")
         k = top_k if top_k is not None else (self._config.top_k or 5)
@@ -43,13 +42,12 @@ class Retriever:
                 else:
                     self._logger.warning("Ignoring invalid filter key '%s'. Allowed: %s", key, sorted(list(allowed)))
         
-        print(f"   Prioritized filters: {prioritized_filters}")
-        print(f"   Validated filters: {validated_filters}")
-        print(f"   Allowed filter fields: {sorted(list(self._config.filter_fields or []))}")
-        
+        self._logger.debug(f" Prioritized filters: {prioritized_filters}")
+        self._logger.debug(f" Validated filters: {validated_filters}")
+        self._logger.debug(f" Allowed filter fields: {sorted(list(self._config.filter_fields or []))}")
         try:
             hits = self._store.search(query_vec, top_k=k, num_candidates=num_candidates, filters=validated_filters)
-            print(f"   Found {len(hits)} hits from vector store")
+            self._logger.debug(f" Found {len(hits)} hits from vector store")
         except Exception as exc:
             self._logger.error("Vector store search failed: %s", exc)
             raise
@@ -81,13 +79,12 @@ class Retriever:
         pricing_field = self._settings.database.pricing_field
         currency = self._settings.database.display.currency
         
-        print(f"   📊 FINAL RESULTS:")
+        self._logger.debug(f" FINAL RESULTS:")
         for i, chunk in enumerate(chunks[:5], 1):  
             metadata = chunk.metadata
             display_value = metadata.get(primary_field, "Unknown")
             price_value = metadata.get(pricing_field, "N/A") if pricing_field else "N/A"
-            print(f"      {i}. {display_value} | {currency} {price_value} | Score: {chunk.score:.3f}")
-        
+            self._logger.debug(f" {i}. {display_value} | {currency} {price_value} | Score: {chunk.score:.3f}")
         return chunks
 
 # Removed complex scoring methods - now using simple boost approach

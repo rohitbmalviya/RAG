@@ -1713,8 +1713,8 @@ class LLMClient(BaseLLM):
         
         # Natural, human-like response (1-2 sentences, conversational)
         response = f"Perfect! I have all your {entity_name} requirements. "
-        response += "To save this and have our team reach out, I just need your name and how to contact you (phone number and email). "
-        response += "What's your name and contact?"
+        response += "To save these and have our team reach out, I'll need your name, phone number, and email address. "
+        response += "Could you please share those with me?"
         
         return response
     

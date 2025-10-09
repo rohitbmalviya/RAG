@@ -131,29 +131,7 @@ FURNISHING & STATUS:
 - RENT TYPE: "lease"/"holiday home ready"/"management fees"
 - MAINTENANCE: "owner"/"tenant"/"shared" (maintenance_covered_by)
 
-AMENITIES (Boolean - set to true if mentioned):
-- GYM: gym, fitness → gym_fitness_center
-- POOL: pool, swimming → swimming_pool  
-- PARKING: parking → parking
-- BALCONY: balcony, terrace → balcony_terrace
-- BEACH: beach access → beach_access
-- ELEVATOR: elevator, lift → elevators
-- SECURITY: security → security_available
-- CONCIERGE: concierge → concierge_available
-- MAID: maid room → maids_room
-- LAUNDRY: laundry → laundry_room
-- STORAGE: storage → storage_room
-- BBQ: bbq → bbq_area
-- PET: pet-friendly → pet_friendly
-- AC: central ac, air conditioning → central_ac_heating
-- SMART: smart home → smart_home_features
-- WASTE: waste disposal → waste_disposal_system
-- POWER: power backup, generator → power_backup
-- MOSQUE: mosque nearby → mosque_nearby
-- JOGGING: jogging, cycling tracks → jogging_cycling_tracks
-- CHILLER: chiller included → chiller_included
-- SUBLEASE: sublease allowed → sublease_allowed
-- CHILDREN: kids play area → childrens_play_area
+{amenity_rules}
 
 DATE FILTERS (format as YYYY-MM-DD):
 - AVAILABLE: "available from Jan 2025"→{{"available_from":"2025-01-01"}}
@@ -307,6 +285,20 @@ def _build_field_descriptions(settings) -> str:
     
     return "\n".join(schema_lines)
 
+def _build_boolean_field_rules(settings) -> str:
+    """Build boolean field extraction rules dynamically from configuration (domain-agnostic)."""
+    feature_config = settings.database.boolean_fields or {}
+    if not feature_config:
+        return ""
+    
+    rules = ["BOOLEAN FEATURES (Boolean - set to true if mentioned):"]
+    for field_name, display_label in feature_config.items():
+        # Generate keywords from the display label
+        keywords = display_label.lower()
+        rules.append(f"- {display_label.upper()}: {keywords} → {field_name}")
+    
+    return "\n".join(rules)
+
 def extract_filters_with_llm_context_aware(query: str, llm_client: LLMClient) -> Dict[str, Any]:
     """
     Extract filters using LLM-only approach with conversation context awareness.
@@ -458,10 +450,12 @@ def _build_dynamic_extraction_prompt(conversation_context: str, user_preferences
     """
     context_section = _build_context_section(conversation_context, user_preferences, existing_filters)
     field_descriptions = _build_field_descriptions(settings)
+    boolean_rules = _build_boolean_field_rules(settings)
     
     # Build the complete prompt with context
     base_instructions = LLM_FILTER_EXTRACTION_INSTRUCTIONS.format(
         field_descriptions=field_descriptions,
+        amenity_rules=boolean_rules,
         query=query
     )
     

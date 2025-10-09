@@ -126,6 +126,60 @@ def _apply_nested_env_overrides(cfg: Dict[str, Any]) -> None:
             example = node.get(last_key)
             node[last_key] = _coerce_value(example, env_value)
 
+class StatusFilterConfig(BaseModel):
+    """Configuration for filtering records by status field."""
+    enabled: bool = True
+    field: str = Field(default="property_status", description="Field to filter on")
+    value: str = Field(default="listed", description="Value to filter for")
+
+class DisplayConfig(BaseModel):
+    """Simple display configuration (direct values - no conditions!)."""
+    currency: str = Field(default="$", description="Currency symbol")
+    measurement_unit: str = Field(default="square feet", description="Measurement unit")
+
+class DatabaseRelation(BaseModel):
+    """Configuration for database relations (both many-to-one and one-to-many).
+    
+    Consistent structure for all relation types:
+    - many_to_one: Uses LEFT JOIN, fetches single value, stores in metadata
+    - one_to_many: Uses separate query, fetches array, stores in metadata
+    """
+    name: str = Field(..., description="Relation identifier (e.g., 'property_type', 'media')")
+    relation_type: str = Field(default="many_to_one", description="Type: 'many_to_one' or 'one_to_many'")
+    foreign_key: str = Field(..., description="FK column (in main table for many-to-one, in child table for one-to-many)")
+    reference_table: str = Field(..., description="Related/child table name")
+    reference_column: str = Field(default="id", description="PK column in reference table")
+    fields_to_fetch: List[str] = Field(..., description="Fields to fetch from related table")
+    alias: str = Field(..., description="Alias in result/metadata")
+    order_by: Optional[str] = Field(None, description="Order by field (for one-to-many)")
+    limit: Optional[int] = Field(None, description="Limit results (for one-to-many, None = no limit)")
+
+class BoostingFieldsConfig(BaseModel):
+    """Field names for boosting features (generic - configurable per domain)."""
+    premium: str = Field(default="premiumBoostingStatus", description="Premium boost field")
+    carousel: str = Field(default="carouselBoostingStatus", description="Carousel boost field")
+    verification: str = Field(default="bnb_verification_status", description="Verification field")
+
+class BoostingActiveValuesConfig(BaseModel):
+    """Active values for boosting fields (configurable per domain)."""
+    premium: str = Field(default="Active", description="Active value for premium")
+    carousel: str = Field(default="Active", description="Active value for carousel")
+    verification: str = Field(default="verified", description="Active value for verification")
+
+class BoostingWeightsConfig(BaseModel):
+    """Weight values for boosting scores (tunable)."""
+    premium: float = Field(default=0.15, description="Boost weight for premium")
+    carousel: float = Field(default=0.1, description="Boost weight for carousel")
+    verification: float = Field(default=0.15, description="Boost weight for verification")
+    all_three: float = Field(default=0.2, description="Additional boost when all three active")
+
+class BoostingConfig(BaseModel):
+    """Optional boosting configuration (can be disabled for non-boosted domains)."""
+    enabled: bool = Field(default=False, description="Enable/disable boosting logic")
+    fields: BoostingFieldsConfig = Field(default_factory=BoostingFieldsConfig)
+    active_values: BoostingActiveValuesConfig = Field(default_factory=BoostingActiveValuesConfig)
+    boost_weights: BoostingWeightsConfig = Field(default_factory=BoostingWeightsConfig)
+
 class DatabaseConfig(BaseModel):
     driver: Optional[str] = None
     host: Optional[str] = None
@@ -138,6 +192,17 @@ class DatabaseConfig(BaseModel):
     columns: List[str] = Field(default_factory=list)
     embedding_columns: List[str] = Field(default_factory=list)
     field_types: Dict[str, str] = Field(default_factory=dict)
+    relations: List[DatabaseRelation] = Field(default_factory=list)
+    status_filter: Optional[StatusFilterConfig] = None
+    boolean_fields: Dict[str, str] = Field(default_factory=dict, description="Boolean fields with display labels (domain-agnostic)")
+    priority_features: List[str] = Field(default_factory=list, description="High priority features for filtering")
+    location_hierarchy: List[str] = Field(default_factory=list, description="Location fields ordered from broad to specific")
+    display: DisplayConfig = Field(default_factory=DisplayConfig, description="Display configuration (currency, units)")
+    primary_display_field: str = Field(default="id", description="Primary field to display in logs (e.g., 'property_title', 'product_name')")
+    pricing_field: Optional[str] = Field(None, description="Field for price aggregations (e.g., 'rent_charge', 'price')")
+    filter_priority_groups: Dict[str, List[str]] = Field(default_factory=dict, description="Grouped filters by priority for retrieval optimization")
+    boosting: Optional[BoostingConfig] = Field(None, description="Optional boosting configuration (disable if not needed)")
+    query_patterns: Dict[str, List[str]] = Field(default_factory=dict, description="Query keyword patterns (e.g., best_property: ['best', 'top'])")
 
 class ChunkingConfig(BaseModel):
     chunk_size: Optional[int] = None
@@ -189,6 +254,7 @@ class LoggingConfig(BaseModel):
     level: Optional[str] = None
 
 class RequirementGatheringConfig(BaseModel):
+    """Configuration for requirement gathering feature (optional)."""
     endpoint: Optional[str] = None
     enabled: Optional[bool] = None
     auto_save_on_conversation_end: Optional[bool] = None

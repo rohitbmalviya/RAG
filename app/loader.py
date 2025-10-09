@@ -42,150 +42,151 @@ def _stringify_value(raw: Optional[object]) -> str:
 
 def _compose_text(row: Dict[str, object], columns: List[str]) -> str:
     """
-    Dynamically compose a text representation of a row based on configured columns.
-    Optimized for semantic search with natural language descriptions.
+    TRULY GENERIC text composition - works with ANY table schema!
+    Uses ONLY config (field_types, location_hierarchy, boolean_fields).
+    NO hardcoded field names!
     """
+    from .config import get_settings
+    settings = get_settings()
+    
     segments: List[str] = []
     amenities: List[str] = []
     
-    # Start with property title for better semantic matching
-    property_title = row.get("property_title")
-    if property_title:
-        segments.append(f"Property: {property_title}")
+    # Helper: Format field name to human-readable label
+    def format_label(field_name: str) -> str:
+        return field_name.replace('number_of_', '').replace('is_', '').replace('has_', '').replace('_', ' ').title()
     
-    # Property type and rent type for context
-    property_type_name = row.get("property_type_name")
-    if property_type_name:
-        segments.append(f"This is a {property_type_name.lower()}")
+    # Helper: Check field category by keywords (works for ANY language/naming)
+    def is_financial(fname: str) -> bool:
+        return any(kw in fname.lower() for kw in ['price', 'rent', 'cost', 'charge', 'fee', 'deposit', 'maintenance', 'payment'])
     
-    rent_type_name = row.get("rent_type_name")
-    if rent_type_name:
-        segments.append(f"Rent type: {rent_type_name}")
+    def is_count(fname: str) -> bool:
+        return any(kw in fname.lower() for kw in ['bed', 'bath', 'room', 'seat', 'capacity'])
     
-    # Location information for better searchability
+    def is_measurement(fname: str) -> bool:
+        return any(kw in fname.lower() for kw in ['size', 'area', 'sqft', 'sqm', 'acre', 'footage'])
+    
+    def is_title_or_name(fname: str) -> bool:
+        return 'title' in fname.lower() or ('name' in fname.lower() and fname not in settings.database.location_hierarchy)
+    
+    # STEP 1: Title/Name Fields (text type + title/name pattern)
+    for field_name in settings.database.columns:
+        if is_title_or_name(field_name):
+            field_type = settings.database.field_types.get(field_name, 'keyword')
+            value = row.get(field_name)
+            if value and field_type == 'text':
+                segments.append(f"{format_label(field_name)}: {value}")
+    
+    # STEP 2: Location (from location_hierarchy config - NO hardcoding!)
     location_parts = []
-    if row.get("emirate"):
-        location_parts.append(row.get("emirate"))
-    if row.get("city"):
-        location_parts.append(row.get("city"))
-    if row.get("community"):
-        location_parts.append(row.get("community"))
-    if row.get("subcommunity"):
-        location_parts.append(row.get("subcommunity"))
-    
+    for field_name in settings.database.location_hierarchy:
+        value = row.get(field_name)
+        if value:
+            location_parts.append(str(value))
     if location_parts:
         segments.append(f"Located in: {', '.join(location_parts)}")
     
-    # Building and developer information
-    building_name = row.get("building_name")
-    if building_name:
-        segments.append(f"Building: {building_name}")
+    # STEP 3: Financial Fields (numeric + financial keywords)
+    currency = settings.database.display.currency
+    for field_name in settings.database.columns:
+        field_type = settings.database.field_types.get(field_name, 'keyword')
+        value = row.get(field_name)
+        
+        if value and field_type in ['float', 'integer'] and is_financial(field_name):
+            try:
+                num_val = float(value)
+                segments.append(f"{format_label(field_name)}: {currency} {num_val:,.0f}")
+            except:
+                segments.append(f"{format_label(field_name)}: {value}")
     
-    developer_name = row.get("developer_name")
-    if developer_name:
-        segments.append(f"Developed by: {developer_name}")
+    # STEP 4: Count Fields (numeric + count keywords)
+    for field_name in settings.database.columns:
+        field_type = settings.database.field_types.get(field_name, 'keyword')
+        value = row.get(field_name)
+        
+        if value and field_type in ['float', 'integer'] and is_count(field_name) and not is_financial(field_name):
+            try:
+                count = int(float(value))
+                label = format_label(field_name).rstrip('s')  # Remove existing 's' if any
+                plural = 's' if count != 1 else ''
+                segments.append(f"{count} {label.lower()}{plural}")
+            except:
+                pass
     
-    # Property specifications
-    bedrooms = row.get("number_of_bedrooms")
-    bathrooms = row.get("number_of_bathrooms")
-    if bedrooms or bathrooms:
-        spec_parts = []
-        if bedrooms:
-            spec_parts.append(f"{bedrooms} bedroom{'s' if bedrooms != 1 else ''}")
-        if bathrooms:
-            spec_parts.append(f"{bathrooms} bathroom{'s' if bathrooms != 1 else ''}")
-        segments.append(f"Property features: {', '.join(spec_parts)}")
+    # STEP 5: Measurement Fields (numeric + size/area keywords)
+    measurement_unit = settings.database.display.measurement_unit
+    for field_name in settings.database.columns:
+        field_type = settings.database.field_types.get(field_name, 'keyword')
+        value = row.get(field_name)
+        
+        if value and field_type in ['float', 'integer'] and is_measurement(field_name) and not is_financial(field_name):
+            try:
+                num_val = float(value)
+                segments.append(f"{format_label(field_name)}: {num_val:,.0f} {measurement_unit}")
+            except:
+                pass
     
-    property_size = row.get("property_size")
-    if property_size:
-        segments.append(f"Size: {property_size} square feet")
-    
-    # Financial information
-    rent_charge = row.get("rent_charge")
-    if rent_charge:
-        segments.append(f"Annual rent: AED {rent_charge:,}")
-    
-    security_deposit = row.get("security_deposit")
-    if security_deposit:
-        segments.append(f"Security deposit: AED {security_deposit:,}")
-    
-    # Furnishing status
-    furnishing_status = row.get("furnishing_status")
-    if furnishing_status:
-        segments.append(f"Furnishing: {furnishing_status.replace('_', ' ').title()}")
-    
-    # Year built
-    year_built = row.get("year_built")
-    if year_built:
-        segments.append(f"Built in: {year_built}")
-    
-    # Floor level
-    floor_level = row.get("floor_level")
-    if floor_level:
-        segments.append(f"Floor: {floor_level}")
-    
-    # Nearby landmarks for location context
-    nearby_landmarks = row.get("nearby_landmarks")
-    if nearby_landmarks:
-        segments.append(f"Nearby landmarks: {nearby_landmarks}")
-    
-    # Process amenities
-    for col in {
-        "maids_room", "security_available", "concierge_available", "central_ac_heating",
-        "elevators", "balcony_terrace", "storage_room", "laundry_room", "gym_fitness_center",
-        "childrens_play_area", "bbq_area", "pet_friendly", "smart_home_features",
-        "beach_access", "jogging_cycling_tracks", "mosque_nearby", "waste_disposal_system",
-        "power_backup", "chiller_included", "sublease_allowed"
-    }:
-        value = row.get(col)
+    # STEP 6: Boolean Features (from boolean_fields config)
+    boolean_config = settings.database.boolean_fields or {}
+    for field_name, display_label in boolean_config.items():
+        value = row.get(field_name)
         if value and str(value).lower() in {"true", "1", "yes"}:
-            amenity_name = col.replace('_', ' ').replace('available', '').replace('  ', ' ').strip()
-            amenities.append(amenity_name.title())
+            amenities.append(display_label)
     
-    # Special amenities with more detail
-    parking = row.get("parking")
-    if parking and str(parking) != "null":
-        segments.append(f"Parking: {_stringify_value(parking)}")
+    # STEP 7: JSON Fields (field_type == 'json')
+    for field_name in settings.database.columns:
+        field_type = settings.database.field_types.get(field_name, 'keyword')
+        value = row.get(field_name)
+        
+        if value and str(value) != "null" and field_type == 'json':
+            # Skip if in boolean_fields (already handled)
+            if field_name not in boolean_config:
+                segments.append(f"{format_label(field_name)}: {_stringify_value(value)}")
     
-    swimming_pool = row.get("swimming_pool")
-    if swimming_pool and str(swimming_pool) != "null":
-        segments.append(f"Swimming pool: {_stringify_value(swimming_pool)}")
+    # STEP 8: Date Fields (field_type == 'date')
+    for field_name in settings.database.columns:
+        field_type = settings.database.field_types.get(field_name, 'keyword')
+        value = row.get(field_name)
+        
+        if value and field_type == 'date':
+            # Include important date fields
+            date_keywords = ['available', 'lease', 'start', 'end', 'listing', 'tenancy']
+            if any(kw in field_name.lower() for kw in date_keywords):
+                segments.append(f"{format_label(field_name)}: {value}")
     
-    # Public transport and retail access
-    public_transport = row.get("public_transport_type")
-    if public_transport and str(public_transport) != "null":
-        segments.append(f"Public transport: {_stringify_value(public_transport)}")
+    # STEP 9: Important Keyword Fields (status, type, level, floor, duration)
+    for field_name in settings.database.columns:
+        field_type = settings.database.field_types.get(field_name, 'keyword')
+        value = row.get(field_name)
+        
+        if value and field_type == 'keyword':
+            # Skip IDs, location fields, and internal fields
+            if ('id' in field_name.lower() or 
+                field_name in settings.database.location_hierarchy or
+                field_name.startswith('_')):
+                continue
+            
+            # Include important categorical fields
+            important_kw = ['status', 'type', 'duration', 'level', 'floor', 'furnish']
+            if any(kw in field_name.lower() for kw in important_kw):
+                formatted_value = str(value).replace('_', ' ').title() if isinstance(value, str) else str(value)
+                segments.append(f"{format_label(field_name)}: {formatted_value}")
     
-    retail_access = row.get("retail_shopping_access")
-    if retail_access and str(retail_access) != "null":
-        segments.append(f"Shopping access: {_stringify_value(retail_access)}")
+    # STEP 10: Text Description Fields (field_type == 'text', not title/name)
+    for field_name in settings.database.columns:
+        field_type = settings.database.field_types.get(field_name, 'keyword')
+        value = row.get(field_name)
+        
+        if value and field_type == 'text':
+            # Skip title/name fields (already processed)
+            if not is_title_or_name(field_name):
+                # Include descriptions, landmarks, notes
+                if any(kw in field_name.lower() for kw in ['description', 'landmark', 'note', 'detail']):
+                    segments.append(f"{format_label(field_name)}: {value}")
     
-    # Availability
-    available_from = row.get("available_from")
-    if available_from:
-        segments.append(f"Available from: {available_from}")
-    
-    # Lease duration
-    lease_duration = row.get("lease_duration")
-    if lease_duration:
-        segments.append(f"Lease duration: {lease_duration}")
-    
-    # Boosting and verification status for "best property" queries
-    bnb_verification_status = row.get("bnb_verification_status")
-    if bnb_verification_status and bnb_verification_status != "notrequired":
-        segments.append(f"Verification status: {bnb_verification_status}")
-    
-    premium_boosting = row.get("premiumBoostingStatus")
-    if premium_boosting and premium_boosting == "Active":
-        segments.append("Premium boosted property")
-    
-    carousel_boosting = row.get("carouselBoostingStatus")
-    if carousel_boosting and carousel_boosting == "Active":
-        segments.append("Prime featured property")
-    
-    # Add amenities section
+    # STEP 11: Add amenities/features section
     if amenities:
-        segments.append(f"Amenities include: {', '.join(amenities)}")
+        segments.append(f"Amenities: {', '.join(amenities)}")
     
     return "\n".join(segments)
 
@@ -203,25 +204,25 @@ def _select_embedding_columns(settings: Settings, all_cols: List[str]) -> List[s
     field_types = db.field_types or {}
     return [c for c in all_cols if field_types.get(c) == "text"]
 
-def _process_media_item(item: Dict[str, object]) -> Optional[Dict[str, object]]:
-    """Process a single media item and return structured data."""
+def _process_media_item(item: Dict[str, object], fields_to_fetch: List[str]) -> Optional[Dict[str, object]]:
+    """
+    Process a single media item and return structured data.
+    GENERIC - uses fields_to_fetch from relation config, NO hardcoded field names!
+    """
     if not isinstance(item, dict):
         return None
     
     media_entry: Dict[str, object] = {}
-    if item.get("id") is not None:
-        media_entry["id"] = item.get("id")
-    if item.get("file_name") is not None:
-        media_entry["file_name"] = item.get("file_name")
-    if item.get("thumbnail_url") is not None:
-        media_entry["thumbnail_url"] = item.get("thumbnail_url")
+    for field_name in fields_to_fetch:
+        if item.get(field_name) is not None:
+            media_entry[field_name] = item.get(field_name)
     
     return media_entry if media_entry else None
 
-def _extract_media_metadata(src: Dict[str, object]) -> Dict[str, object]:
+def _extract_media_metadata(src: Dict[str, object], fields_to_fetch: List[str]) -> Dict[str, object]:
     """
-    Extract media objects from a 'media' array if present. Produces:
-    - media: top 5 objects {id, file_name, thumbnail_url}
+    Extract media objects from a 'media' array if present.
+    GENERIC - uses fields_to_fetch from relation config, NO hardcoded field names!
     """
     media_meta: Dict[str, object] = {}
     media_items: Optional[object] = src.get("media")
@@ -233,7 +234,7 @@ def _extract_media_metadata(src: Dict[str, object]) -> Dict[str, object]:
     if isinstance(media_items, list) and media_items:
         media_objs: List[Dict[str, object]] = []
         for item in media_items:
-            media_entry = _process_media_item(item)
+            media_entry = _process_media_item(item, fields_to_fetch)
             if media_entry:
                 media_objs.append(media_entry)
         if media_objs:
@@ -250,45 +251,82 @@ def _yield_in_batches(items: Iterable[Document], batch_size: int) -> Generator[L
     if batch:
         yield batch
 
-def _build_media_map(conn: "psycopg.Connection", property_ids: List[str]) -> Dict[str, Dict[str, object]]:
+def _build_media_map(conn: "psycopg.Connection", property_ids: List[str], settings = None) -> Dict[str, Dict[str, object]]:
     """
-    Attempt to fetch media rows for given property_ids from table 'property_media'.
-    Returns a map: propertyId -> {image_urls[:5]}
-    Silently returns empty on any failure (e.g., table missing).
+    Fetch child relations (e.g., media) for given property IDs using configuration.
+    Returns a map: property_id -> {relation_alias: [items]}
+    
+    Now reads configuration from settings.database.relations for one-to-many relations.
     """
-    media_map: Dict[str, Dict[str, object]] = {}
+    if settings is None:
+        from .config import get_settings
+        settings = get_settings()
+    
+    result_map: Dict[str, Dict[str, object]] = {}
     if not property_ids:
-        return media_map
-    try:
-        with conn.cursor(row_factory=dict_row) as mcur:
-            sql = (
-                'SELECT "propertyId", "id", "file_name", "thumbnail_url", "order" '
-                'FROM "property_media" WHERE "propertyId" = ANY(%s) '
-                'ORDER BY "propertyId", COALESCE("order", 2147483647), "order", "id"'
-            )
-            mcur.execute(sql, (property_ids,))
-            rows: List[Dict[str, object]] = mcur.fetchall()
-        tmp: Dict[str, List[Dict[str, object]]] = {}
-        for r in rows:
-            pid = str(r.get("propertyId") or "")
-            if not pid:
-                continue
-            tmp.setdefault(pid, []).append(r)
-        for pid, items in tmp.items():
-            media_objs: List[Dict[str, object]] = []
-            for item in items:
-                media_entry = _process_media_item(item)
-                if media_entry:
-                    media_objs.append(media_entry)
-            entry: Dict[str, object] = {}
-            if media_objs:
-                entry["media"] = media_objs[:5]
-            if entry:
-                media_map[pid] = entry
-    except Exception:
-        
-        return {}
-    return media_map
+        return result_map
+    
+    # Find one-to-many relations from config
+    one_to_many_relations = [
+        rel for rel in (settings.database.relations or [])
+        if rel.relation_type == "one_to_many"
+    ]
+    
+    if not one_to_many_relations:
+        return result_map
+    
+    # Process each one-to-many relation
+    for relation in one_to_many_relations:
+        try:
+            with conn.cursor(row_factory=dict_row) as cur:
+                # Build SELECT clause from config
+                select_fields = [f'"{relation.foreign_key}"']
+                if relation.fields_to_fetch:
+                    for field in relation.fields_to_fetch:
+                        select_fields.append(f'"{field}"')
+                
+                # Build ORDER BY clause
+                order_clause = ""
+                if relation.order_by:
+                    order_clause = f'ORDER BY "{relation.foreign_key}", COALESCE("{relation.order_by}", 2147483647), "{relation.order_by}"'
+                
+                # Build and execute query
+                sql = f'''SELECT {", ".join(select_fields)} FROM "{relation.reference_table}" WHERE "{relation.foreign_key}" = ANY(%s) {order_clause}'''
+                cur.execute(sql, (property_ids,))
+                rows: List[Dict[str, object]] = cur.fetchall()
+            
+            # Group by parent ID
+            temp: Dict[str, List[Dict[str, object]]] = {}
+            for r in rows:
+                parent_id = str(r.get(relation.foreign_key) or "")
+                if not parent_id:
+                    continue
+                temp.setdefault(parent_id, []).append(r)
+            
+            # Build result with limit
+            for parent_id, items in temp.items():
+                # Apply limit if configured
+                limited_items = items[:relation.limit] if relation.limit else items
+                
+                # Process items (remove FK from each item for cleaner metadata)
+                clean_items = []
+                for item in limited_items:
+                    clean_item = {k: v for k, v in item.items() if k != relation.foreign_key}
+                    if clean_item:
+                        clean_items.append(clean_item)
+                
+                # Add to result map
+                if parent_id not in result_map:
+                    result_map[parent_id] = {}
+                result_map[parent_id][relation.alias] = clean_items
+                
+        except Exception as e:
+            # Silently continue if child relation fails
+            logger = get_logger(__name__)
+            logger.warning(f"Failed to fetch {relation.name} relation: {e}")
+            continue
+    
+    return result_map
 
 def _create_document_from_row(
     row: Dict[str, object], 
@@ -302,11 +340,14 @@ def _create_document_from_row(
     for c in cols:
         metadata[c] = row.get(c)
     
-    
+    # Process media using relation config (generic!)
     if "media" in row and row["media"]:
         try:
-            media_md = _extract_media_metadata({"media": row["media"]})
-            metadata.update(media_md)
+            # Get media relation config to find fields_to_fetch
+            media_relation = next((r for r in settings.database.relations if r.name == "media"), None)
+            if media_relation and media_relation.fields_to_fetch:
+                media_md = _extract_media_metadata({"media": row["media"]}, media_relation.fields_to_fetch)
+                metadata.update(media_md)
         except Exception:
             pass
     
@@ -315,7 +356,6 @@ def _create_document_from_row(
 
 def _load_documents_from_csv(path: str, settings: Settings) -> Iterable[Document]:
     import csv
-    logger = get_logger(__name__)
     cols, embed_cols = _prepare_columns(settings)
     with open(path, newline="", encoding=UTF8_ENCODING) as f:
         reader = csv.DictReader(f)
@@ -323,17 +363,22 @@ def _load_documents_from_csv(path: str, settings: Settings) -> Iterable[Document
             yield _create_document_from_row(row, settings, cols, embed_cols)
 
 def _load_documents_from_jsonl(path: str, settings: Settings) -> Iterable[Document]:
-    logger = get_logger(__name__)
     cols, embed_cols = _prepare_columns(settings)
+    
+    # Get media fields from relation config (generic!)
+    media_relation = next((r for r in settings.database.relations if r.name == "media"), None)
+    media_fields = media_relation.fields_to_fetch if media_relation else []
+    
     with open(path, "r", encoding=UTF8_ENCODING) as f:
         for line in f:
             if not line.strip():
                 continue
             data = json.loads(line)
             
-            media_md = _extract_media_metadata(data)
-            if media_md:
-                data.update(media_md)
+            if media_fields:
+                media_md = _extract_media_metadata(data, media_fields)
+                if media_md:
+                    data.update(media_md)
             yield _create_document_from_row(data, settings, cols, embed_cols)
 
 def _load_documents_from_txt(path: str, settings: Settings) -> Iterable[Document]:
@@ -375,25 +420,82 @@ def _prepare_sql_columns(db) -> tuple[str, List[str], List[str]]:
     quoted_cols = [f'"{c}"' for c in sql_cols]
     return quoted_id_col, quoted_cols, cols
 
-def _build_sql_query(table: str, quoted_id_col: str, quoted_cols: List[str], where_clause: str = "") -> str:
-    """Build SQL query with JOINs for property and rent type names."""
+def _build_sql_query(table: str, quoted_id_col: str, quoted_cols: List[str], where_clause: str = "", settings = None) -> str:
+    """Build SQL query with dynamic JOINs from configuration.
+    
+    This function reads relation configuration from settings and builds
+    JOIN clauses dynamically, making the system fully generic and configurable.
+    
+    Args:
+        table: Main table name
+        quoted_id_col: Quoted ID column name
+        quoted_cols: List of quoted column names
+        where_clause: Additional WHERE conditions
+        settings: Settings object (auto-loaded if None)
+    
+    Returns:
+        Complete SQL query string with dynamic JOINs
+    """
+    if settings is None:
+        from .config import get_settings
+        settings = get_settings()
+    
+    # Build main table columns
     qualified_columns = []
     for col in [quoted_id_col] + quoted_cols:
         qualified_columns.append(f'p.{col}')
     qualified_select_cols = ", ".join(qualified_columns)
     
-    # CRITICAL: Only process properties with property_status = 'listed' for RAG
-    base_query = f"""
-        SELECT {qualified_select_cols},
-               pt.name as property_type_name,
-               prt.name as rent_type_name
-        FROM "{table}" p
-        LEFT JOIN property_types pt ON p.property_type_id = pt.id
-        LEFT JOIN property_rent_types prt ON p.rent_type_id = prt.id
-        WHERE p.property_status = 'listed'"""
+    # Build JOIN clauses and SELECT additions from config
+    # Only process many-to-one relations (one-to-many handled separately)
+    join_clauses = []
+    select_additions = []
     
+    if settings.database.relations:
+        for relation in settings.database.relations:
+            # Skip one-to-many relations (handled by _build_media_map)
+            if relation.relation_type == "one_to_many":
+                continue
+            
+            alias = f"{relation.name}_tbl"
+            
+            # Build JOIN clause for many-to-one
+            join_clause = f"""LEFT JOIN {relation.reference_table} {alias} ON p.{relation.foreign_key} = {alias}.{relation.reference_column}"""
+            join_clauses.append(join_clause)
+            
+            # Build SELECT addition using fields_to_fetch (consistent structure)
+            if relation.fields_to_fetch:
+                # For many-to-one, typically fetch single field (e.g., "name")
+                # If multiple fields specified, use first one as primary
+                primary_field = relation.fields_to_fetch[0]
+                select_additions.append(f"{alias}.{primary_field} as {relation.alias}")
+    
+    # Build WHERE clauses
+    where_clauses = []
+    
+    # Add status filter from config
+    if settings.database.status_filter and settings.database.status_filter.enabled:
+        status_field = settings.database.status_filter.field
+        status_value = settings.database.status_filter.value
+        where_clauses.append(f"p.{status_field} = '{status_value}'")
+    
+    # Add custom where clause if provided
     if where_clause:
-        base_query += f" AND {where_clause}"
+        where_clauses.append(where_clause)
+    
+    # Combine all parts
+    select_clause = qualified_select_cols
+    if select_additions:
+        select_clause += ", " + ", ".join(select_additions)
+    
+    # Build complete query
+    base_query = f"""
+        SELECT {select_clause}
+        FROM "{table}" p
+        {' '.join(join_clauses)}"""
+    
+    if where_clauses:
+        base_query += f"\n        WHERE {' AND '.join(where_clauses)}"
     
     return base_query
 
@@ -403,26 +505,48 @@ def _create_document_from_sql_row(
     cols: List[str], 
     embed_cols: List[str], 
     id_column: str,
-    media_map: Optional[Dict[str, Dict[str, object]]] = None
+    media_map: Optional[Dict[str, Dict[str, object]]] = None,
+    settings = None
 ) -> Document:
-    """Create a Document from a SQL row with common metadata processing."""
+    """Create a Document from a SQL row with common metadata processing.
+    
+    Now handles relations dynamically from config instead of hardcoded field names.
+    """
+    if settings is None:
+        from .config import get_settings
+        settings = get_settings()
+    
     row_id = str(row[id_column])
     metadata = {"table": table, "id": row_id}
     
+    # Get relation configuration (only many-to-one for FK skipping)
+    relation_aliases = set()
+    foreign_keys = set()
+    if settings.database.relations:
+        for rel in settings.database.relations:
+            # Only process many-to-one for this logic
+            if rel.relation_type == "many_to_one":
+                relation_aliases.add(rel.alias)
+                foreign_keys.add(rel.foreign_key)
+    
+    # Process regular columns
     for c in cols:
         if c in row:
-            if c == "property_type_id" and "property_type_name" in row and row["property_type_name"]:
-                continue  
-            if c == "rent_type_id" and "rent_type_name" in row and row["rent_type_name"]:
-                continue  
+            # Skip FK columns if we have the relation alias (to avoid duplicate data)
+            if c in foreign_keys:
+                # Check if we have the relation alias in the row
+                relation = next((r for r in settings.database.relations if r.foreign_key == c), None)
+                if relation and relation.alias in row and row[relation.alias]:
+                    continue  # Skip FK, we have the display name
+            
             metadata[c] = row.get(c)
     
-    if "property_type_name" in row and row["property_type_name"]:
-        metadata["property_type_name"] = row["property_type_name"]
-    if "rent_type_name" in row and row["rent_type_name"]:
-        metadata["rent_type_name"] = row["rent_type_name"]
+    # Add relation aliases to metadata (dynamic from config)
+    for alias in relation_aliases:
+        if alias in row and row[alias]:
+            metadata[alias] = row[alias]
     
-    
+    # Add media metadata if available
     if media_map and row_id in media_map:
         metadata.update(media_map[row_id])
     
@@ -448,9 +572,9 @@ def load_documents(settings: Settings, batch_size: int) -> Generator[List[Docume
     
     if source_type == "sql":
         dsn = _build_sql_connection_string(db)
-        sql = _build_sql_query(table, quoted_id_col, quoted_cols)
+        sql = _build_sql_query(table, quoted_id_col, quoted_cols, "", settings)
         
-        logger.info(f"Loading documents from table '{table}' with columns {cols} and joined property/rent type names")
+        logger.info(f"Loading documents from table '{table}' with columns {cols} and dynamically configured relations")
         if db.id_column not in db.columns:
             logger.warning("Configured id_column '%s' not present in database.columns; ensure it's selected", db.id_column)
         with psycopg.connect(dsn, row_factory=dict_row) as conn:
@@ -462,7 +586,7 @@ def load_documents(settings: Settings, batch_size: int) -> Generator[List[Docume
                     if not rows:
                         break       
                     prop_ids: List[str] = [str(r[db.id_column]) for r in rows if r.get(db.id_column) is not None]
-                    media_map = _build_media_map(conn, prop_ids)
+                    media_map = _build_media_map(conn, prop_ids, settings)
                     documents: List[Document] = []
                     for row in rows:
                         
@@ -471,7 +595,7 @@ def load_documents(settings: Settings, batch_size: int) -> Generator[List[Docume
                                 row_id = str(row[db.id_column])
                                 logger.warning("Row %s missing expected column '%s'", row_id, c)
                         
-                        doc = _create_document_from_sql_row(row, table, cols, embed_cols, db.id_column, media_map)
+                        doc = _create_document_from_sql_row(row, table, cols, embed_cols, db.id_column, media_map, settings)
                         documents.append(doc)
                     yield documents
         return
@@ -505,7 +629,7 @@ def load_document_by_id(settings: Settings, record_id: str) -> Optional[Document
     quoted_id_col, quoted_cols, cols = _prepare_sql_columns(db)
     _, embed_cols = _prepare_columns(settings)
     
-    sql = _build_sql_query(table, quoted_id_col, quoted_cols, f"p.{quoted_id_col} = %s")
+    sql = _build_sql_query(table, quoted_id_col, quoted_cols, f"p.{quoted_id_col} = %s", settings)
     dsn = _build_sql_connection_string(db)
     try:
         with psycopg.connect(dsn, row_factory=dict_row) as conn:
@@ -515,8 +639,8 @@ def load_document_by_id(settings: Settings, record_id: str) -> Optional[Document
                 if not row:
                     return None
                 
-                media_map = _build_media_map(conn, [record_id])
-                return _create_document_from_sql_row(row, table, cols, embed_cols, db.id_column, media_map)
+                media_map = _build_media_map(conn, [record_id], settings)
+                return _create_document_from_sql_row(row, table, cols, embed_cols, db.id_column, media_map, settings)
     except Exception:
         logger.exception("Failed to load record %s from table %s", record_id, table)
         return None

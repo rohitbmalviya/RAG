@@ -16,6 +16,153 @@ database:
   password: ${DB_PASSWORD}
   table: properties
   id_column: id
+  
+  # Status filter configuration - filters which records to process
+  status_filter:
+    enabled: true
+    field: property_status
+    value: listed
+  
+  # Table relations configuration - defines foreign key JOINs and child relations
+  relations:
+    # Many-to-one relations (LEFT JOIN in main query)
+    - name: property_type
+      relation_type: many_to_one
+      foreign_key: property_type_id
+      reference_table: property_types
+      reference_column: id
+      fields_to_fetch:
+        - name
+      alias: property_type_name
+      
+    - name: rent_type
+      relation_type: many_to_one
+      foreign_key: rent_type_id
+      reference_table: property_rent_types
+      reference_column: id
+      fields_to_fetch:
+        - name
+      alias: rent_type_name
+    
+    # One-to-many relations (separate query)
+    - name: media
+      relation_type: one_to_many
+      foreign_key: propertyId
+      reference_table: property_media
+      reference_column: id
+      fields_to_fetch:
+        - file_name
+        - thumbnail_url
+        - id
+      alias: media
+      order_by: order
+      limit: 5
+  
+  # Boolean fields configuration - all boolean fields with display labels (domain-agnostic)
+  boolean_fields:
+    gym_fitness_center: "Gym"
+    swimming_pool: "Pool"
+    maids_room: "Maid's Room"
+    security_available: "Security"
+    concierge_available: "Concierge"
+    central_ac_heating: "Central AC"
+    elevators: "Elevators"
+    balcony_terrace: "Balcony"
+    storage_room: "Storage"
+    laundry_room: "Laundry"
+    childrens_play_area: "Children's Play Area"
+    bbq_area: "BBQ Area"
+    pet_friendly: "Pet-Friendly"
+    smart_home_features: "Smart Home"
+    waste_disposal_system: "Waste Disposal"
+    power_backup: "Power Backup"
+    mosque_nearby: "Mosque Nearby"
+    beach_access: "Beach Access"
+    jogging_cycling_tracks: "Jogging/Cycling Tracks"
+    chiller_included: "Chiller Included"
+    sublease_allowed: "Sublease Allowed"
+  
+  # Priority features (high priority for filtering and display)
+  priority_features:
+    - swimming_pool
+    - pet_friendly
+    - gym_fitness_center
+    - parking
+    - balcony_terrace
+  
+  # Location field hierarchy (from broad to specific) - domain-agnostic
+  location_hierarchy:
+    - emirate        # Level 1: Country/Region/State
+    - city           # Level 2: City
+    - community      # Level 3: Community/Neighborhood/District
+    - subcommunity   # Level 4: Sub-area/Locality
+    - building_name  # Level 5: Building/Complex
+  
+  # Display configuration (simple direct values)
+  display:
+    currency: "AED"
+    measurement_unit: "square feet"
+  
+  # Primary field for display in logs (generic - change per domain)
+  primary_display_field: "property_title"  # For US: "listing_name", For UK: "property_name"
+  
+  # Pricing field for aggregations (generic - change per domain)
+  pricing_field: "rent_charge"  # For US: "monthly_rent", For UK: "rent_pcm"
+  
+  # Filter priority groups (for retrieval optimization)
+  filter_priority_groups:
+    location:
+      - emirate
+      - city
+      - community
+      - subcommunity
+      - nearby_landmarks
+      - public_transport_type
+    budget:
+      - rent_charge
+      - security_deposit
+      - maintenance_charge
+    property_type:
+      - property_type_name
+    rooms:
+      - number_of_bedrooms
+      - number_of_bathrooms
+    furnishing:
+      - furnishing_status
+    lease:
+      - lease_duration
+      - rent_type_name
+    availability:
+      - available_from
+  
+  # Boosting configuration (optional - disable for domains without boosting)
+  boosting:
+    enabled: true  # Set to false for non-boosted domains (products, jobs, etc.)
+    fields:
+      premium: "premiumBoostingStatus"
+      carousel: "carouselBoostingStatus"
+      verification: "bnb_verification_status"
+    active_values:
+      premium: "Active"
+      carousel: "Active"
+      verification: "verified"
+    boost_weights:
+      premium: 0.15
+      carousel: 0.1
+      verification: 0.15
+      all_three: 0.2  # Additional boost when all three are active
+  
+  # Query patterns (for special query handling)
+  query_patterns:
+    best_property:
+      - "best"
+      - "top"
+      - "premium"
+      - "featured"
+      - "recommended"
+      - "highest quality"
+
+  # Field columns list
   columns:
     - id
     - property_title
@@ -299,7 +446,7 @@ memory:
     summarize_older: true # ask LLM to summarize older history
     ttl_seconds: 900 # expire after 15 min of inactivity
 
-# Requirement gathering configuration
+# Requirement gathering configuration (optional feature)
 requirement_gathering:
   endpoint: http://localhost:5000/backend/api/v1/user/requirement
   retry_attempts: 3
@@ -308,10 +455,10 @@ requirement_gathering:
   auto_save_on_conversation_end: true
   ask_user_confirmation: true
   priority_fields:
-    - location # address in which the user is looking for a property
+    - location
     - property_type_name
     - number_of_bedrooms
     - rent_charge
     - furnishing_status
-    - amenities # optional
-    - lease_duration # optional
+    - amenities
+    - lease_duration

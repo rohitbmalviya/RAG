@@ -254,14 +254,14 @@ class VectorStoreClient(BaseVectorStore):
         hits = resp.get("hits", {}).get("hits", [])
         print(f"   Raw hits count: {len(hits)}")
         
-        # Debug: Show property details for first few hits
+        # Debug: Show details for first few hits (GENERIC - uses config!)
+        primary_field = settings.database.primary_display_field
         for i, hit in enumerate(hits[:5], 1):
             source = hit.get("_source", {})
             metadata = source.get("metadata", {})
-            emirate = metadata.get("emirate", "Unknown")
-            property_type = metadata.get("property_type_name", "Unknown")
-            property_title = metadata.get("property_title", "Unknown")
-            print(f"   Hit {i}: {property_title} | Type: {property_type} | Emirate: {emirate}")
+            display_value = metadata.get(primary_field, "Unknown")
+            doc_id = metadata.get("id", "N/A")
+            print(f"   Hit {i}: {display_value} (ID: {doc_id})")
         
         return hits
 
@@ -283,3 +283,140 @@ class VectorStoreClient(BaseVectorStore):
             raise
         deleted = int(resp.get("deleted", 0)) if isinstance(resp, dict) else 0
         return deleted
+
+    def calculate_average_price(self, filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Calculate average, median, and count of pricing field with filters using Elasticsearch aggregation.
+        GENERIC - uses pricing_field from config!
+        
+        Returns:
+            Dict with keys: average, median, min, max, count, location_context
+        """
+        index = self._get_index_name()
+        settings = get_settings()
+        
+        # Get pricing field from config (GENERIC!)
+        pricing_field = settings.database.pricing_field
+        if not pricing_field:
+            self._logger.error("pricing_field not configured - cannot calculate averages")
+            return {"average": 0, "median": 0, "min": 0, "max": 0, "count": 0, "location_context": "N/A"}
+        
+        pricing_field_path = f"metadata.{pricing_field}"
+        
+        print(f"\n💰 AVERAGE PRICE CALCULATION:")
+        print(f"   Index: {index}")
+        print(f"   Pricing field: {pricing_field}")
+        print(f"   Filters: {filters}")
+        
+        # Build query with filters (GENERIC - uses configured pricing_field!)
+        es_query: Dict[str, Any] = {
+            "size": 0,  # We only want aggregations, not documents
+            "query": {
+                "bool": {
+                    "must": [
+                        {"exists": {"field": pricing_field_path}},  # Must have pricing field
+                        {"range": {pricing_field_path: {"gt": 0}}}  # Must be positive
+                    ]
+                }
+            },
+            "aggs": {
+                "price_stats": {
+                    "stats": {
+                        "field": pricing_field_path
+                    }
+                },
+                "price_percentiles": {
+                    "percentiles": {
+                        "field": pricing_field_path,
+                        "percents": [50]  # Median
+                    }
+                }
+            }
+        }
+        
+        # Add filter clauses if provided
+        filter_clauses: List[Dict[str, Any]] = []
+        if filters:
+            allowed = set(settings.retrieval.filter_fields or [])
+            print(f"   Allowed filter fields: {sorted(list(allowed))}")
+            
+            for key, value in filters.items():
+                if key not in allowed or value is None:
+                    print(f"   Skipping filter {key}: not allowed or None")
+                    continue
+                
+                # Use consistent field mapping
+                filter_key = f"metadata.{key}"
+                print(f"   Processing filter: {key} = {value} -> {filter_key}")
+                
+                if isinstance(value, dict):
+                    # Handle range queries
+                    range_clause: Dict[str, Any] = {"range": {filter_key: {}}}
+                    for bound in ("gte", "lte", "gt", "lt"):
+                        if bound in value:
+                            range_clause["range"][filter_key][bound] = value[bound]
+                    if range_clause["range"][filter_key]:
+                        filter_clauses.append(range_clause)
+                        print(f"   Added range filter: {range_clause}")
+                elif isinstance(value, list):
+                    # Handle multiple values
+                    filter_clauses.append({"terms": {filter_key: value}})
+                    print(f"   Added terms filter: {filter_key} in {value}")
+                else:
+                    # Handle single value
+                    filter_clauses.append({"term": {filter_key: value}})
+                    print(f"   Added term filter: {filter_key} = {value}")
+        
+        if filter_clauses:
+            es_query["query"]["bool"]["filter"] = filter_clauses
+            print(f"   Final ES query with filters: {es_query}")
+        
+        try:
+            resp = self._client.search(index=index, body=es_query)
+            print(f"   Aggregation response received")
+        except Exception as exc:
+            self._logger.error("Elasticsearch aggregation failed: %s", exc)
+            raise
+        
+        # Extract aggregation results
+        aggs = resp.get("aggregations", {})
+        price_stats = aggs.get("price_stats", {})
+        price_percentiles = aggs.get("price_percentiles", {})
+        
+        result = {
+            "average": round(price_stats.get("avg", 0), 2) if price_stats.get("avg") else 0,
+            "median": round(price_percentiles.get("values", {}).get("50.0", 0), 2) if price_percentiles.get("values") else 0,
+            "min": round(price_stats.get("min", 0), 2) if price_stats.get("min") else 0,
+            "max": round(price_stats.get("max", 0), 2) if price_stats.get("max") else 0,
+            "count": int(price_stats.get("count", 0)),
+            "location_context": self._extract_location_context(filters) if filters else "UAE",
+            "filters_applied": filters or {}
+        }
+        
+        print(f"   📊 AVERAGE PRICE RESULTS:")
+        print(f"      Average: AED {result['average']:,}")
+        print(f"      Median: AED {result['median']:,}")
+        print(f"      Min: AED {result['min']:,}")
+        print(f"      Max: AED {result['max']:,}")
+        print(f"      Count: {result['count']} properties")
+        print(f"      Location: {result['location_context']}")
+        
+        return result
+    
+    def _extract_location_context(self, filters: Dict[str, Any]) -> str:
+        """Extract location context from filters for display purposes.
+        GENERIC - uses location_hierarchy from config!
+        """
+        settings = get_settings()
+        location_parts = []
+        
+        # Iterate location hierarchy in reverse (most specific first)
+        for location_field in reversed(settings.database.location_hierarchy):
+            if location_field in filters:
+                value = str(filters[location_field]).title()
+                location_parts.append(value)
+        
+        if location_parts:
+            return ", ".join(location_parts)
+        
+        # Fallback - use first location field or generic name
+        return settings.database.location_hierarchy[0].upper() if settings.database.location_hierarchy else "Location"

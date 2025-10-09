@@ -765,6 +765,22 @@ class LLMClient(BaseLLM):
         print(f"   Has property data: {bool(retrieved_chunks)}")
         print(f"   Retrieved chunks count: {len(retrieved_chunks) if retrieved_chunks else 0}")
         
+        # Check if this is an average price query BEFORE processing with LLM
+        if self._is_average_price_query(user_input):
+            print(f"   💰 AVERAGE PRICE QUERY DETECTED!")
+            answer = self._handle_average_price_query(user_input)
+            print(f"   ✅ AVERAGE PRICE CALCULATION COMPLETED!")
+            self._add_conversation_messages(user_input, answer)
+            return answer, False  # No sources for average price queries
+        
+        # Check if this is a general knowledge query BEFORE processing with LLM
+        if self._is_general_knowledge_query(user_input):
+            print(f"   📚 GENERAL KNOWLEDGE QUERY DETECTED!")
+            answer = self._handle_general_knowledge_query(user_input)
+            print(f"   ✅ GENERAL KNOWLEDGE QUERY COMPLETED!")
+            self._add_conversation_messages(user_input, answer)
+            return answer, False  # No sources for general knowledge queries
+        
         # Check if this is a requirement gathering request BEFORE processing with LLM
         if self._is_requirement_gathering_request(user_input):
             print(f"   📝 REQUIREMENT GATHERING REQUEST DETECTED!")
@@ -780,10 +796,106 @@ class LLMClient(BaseLLM):
         print(f"   LLM Response: {llm_response[:200]}...")
         print(f"   Parsed Answer: {answer[:100]}...")
         print(f"   Should Show Sources: {should_show_sources}")
+        
+        # CRITICAL: Enforce context-bound responses for property queries
+        if should_show_sources and retrieved_chunks:
+            answer = self._enforce_context_bound_response(answer, retrieved_chunks, user_input)
+        
         self._add_conversation_messages(user_input, answer)
 
         return answer, should_show_sources
 
+    def _enforce_context_bound_response(self, answer: str, retrieved_chunks: List[RetrievedChunk], user_query: str) -> str:
+        """HARD enforcement: Ensure LLM only uses data from retrieved chunks.
+        
+        This validates:
+        1. Property details (rent, bedrooms, location) match retrieved chunks
+        2. No hallucinated property names or features
+        3. Numeric values (rent, size) come from actual chunks
+        """
+        print(f"\n🛡️ CONTEXT-BOUND ENFORCEMENT:")
+        print(f"   Checking answer against {len(retrieved_chunks)} retrieved chunks")
+        
+        # Extract property IDs from retrieved chunks
+        valid_property_ids = set()
+        valid_property_titles = set()
+        valid_rent_charges = set()
+        valid_locations = set()
+        
+        for chunk in retrieved_chunks:
+            metadata = chunk.metadata
+            prop_id = metadata.get("id")
+            prop_title = metadata.get("property_title")
+            rent_charge = metadata.get("rent_charge")
+            emirate = metadata.get("emirate")
+            community = metadata.get("community")
+            
+            if prop_id:
+                valid_property_ids.add(str(prop_id))
+            if prop_title:
+                valid_property_titles.add(prop_title.lower())
+            if rent_charge:
+                valid_rent_charges.add(float(rent_charge))
+            if emirate:
+                valid_locations.add(emirate.lower())
+            if community:
+                valid_locations.add(community.lower())
+        
+        print(f"   Valid properties: {len(valid_property_titles)} titles, {len(valid_rent_charges)} rent values")
+        
+        # Check for hallucination patterns
+        answer_lower = answer.lower()
+        
+        # Pattern 1: Check if answer mentions rent values not in chunks
+        import re
+        rent_pattern = r'aed\s*([\d,]+(?:\.\d+)?)'
+        mentioned_rents = re.findall(rent_pattern, answer_lower)
+        
+        hallucinated_rents = []
+        for rent_str in mentioned_rents:
+            try:
+                rent_value = float(rent_str.replace(',', ''))
+                # Allow ±5% tolerance for rounding
+                is_valid = any(abs(rent_value - valid_rent) / valid_rent < 0.05 for valid_rent in valid_rent_charges)
+                if not is_valid:
+                    hallucinated_rents.append(rent_value)
+            except ValueError:
+                pass
+        
+        if hallucinated_rents:
+            print(f"   ⚠️ WARNING: Hallucinated rent values detected: {hallucinated_rents}")
+            print(f"   Valid rents were: {valid_rent_charges}")
+            
+            # Add disclaimer to response
+            answer += "\n\n*Note: Please verify property details directly with the listing for accuracy.*"
+        
+        # Pattern 2: If no chunks but answer mentions specific properties, flag it
+        if not retrieved_chunks and any(keyword in answer_lower for keyword in ["property", "apartment", "villa", "aed"]):
+            print(f"   ❌ CRITICAL: LLM mentioned properties with NO retrieved chunks!")
+            # Override with safe response
+            return (
+                "I apologize, but I couldn't find any specific properties matching your criteria in our database. "
+                "Would you like to:\n"
+                "1. Adjust your search criteria (location, budget, property type)\n"
+                "2. Save your requirements so our team can find matching properties for you\n\n"
+                "What would you prefer?"
+            )
+        
+        # Pattern 3: Check if answer mentions locations not in chunks
+        mentioned_locations = []
+        for location in ["dubai marina", "downtown dubai", "palm jumeirah", "jbr", "business bay", 
+                        "dubai hills", "arabian ranches", "emirates hills", "jlt", "jvc"]:
+            if location in answer_lower:
+                mentioned_locations.append(location)
+        
+        invalid_locations = [loc for loc in mentioned_locations if loc not in valid_locations]
+        if invalid_locations and valid_locations:
+            print(f"   ⚠️ WARNING: Mentioned locations not in chunks: {invalid_locations}")
+            print(f"   Valid locations were: {valid_locations}")
+        
+        print(f"   ✅ Context enforcement completed")
+        return answer
+    
     def _build_comprehensive_context(self, user_input: str, retrieved_chunks: Optional[List[RetrievedChunk]] = None) -> Dict[str, Any]:
         """Build comprehensive context for LLM decision making."""
         context = {
@@ -801,6 +913,201 @@ class LLMClient(BaseLLM):
         """Check if retrieved chunks contain actual property data."""
         
         return bool(retrieved_chunks)
+
+    def _is_general_knowledge_query(self, user_input: str) -> bool:
+        """Check if user input is asking for general knowledge/definitions."""
+        user_input_lower = user_input.lower().strip()
+        
+        # Check for general knowledge keywords
+        knowledge_keywords = [
+            "what is", "what's", "what are",
+            "define", "definition of", "meaning of",
+            "explain", "explanation of", "tell me about",
+            "what does", "what do", "how does",
+            "what's the difference between", "difference between"
+        ]
+        
+        # Property-related terms that might need definitions
+        property_terms = [
+            "apartment", "villa", "studio", "penthouse", "townhouse", "duplex",
+            "furnished", "semi-furnished", "unfurnished",
+            "holiday home", "ready rent", "management fees",
+            "lease", "leasing", "rent", "rental", "tenancy",
+            "emirate", "community", "subcommunity",
+            "ejari", "makani", "dewa", "chiller",
+            "service charge", "maintenance", "security deposit"
+        ]
+        
+        # Check if query contains knowledge keywords
+        has_knowledge_keyword = any(keyword in user_input_lower for keyword in knowledge_keywords)
+        
+        # Check if query contains property terms
+        has_property_term = any(term in user_input_lower for term in property_terms)
+        
+        # General knowledge query if it has both knowledge keyword and property term
+        if has_knowledge_keyword and has_property_term:
+            print(f"   📚 MATCHED GENERAL KNOWLEDGE PATTERN")
+            return True
+        
+        return False
+    
+    def _handle_general_knowledge_query(self, user_input: str) -> str:
+        """Handle general knowledge queries using web search."""
+        print(f"\n📚 HANDLING GENERAL KNOWLEDGE QUERY:")
+        print(f"   Query: '{user_input}'")
+        
+        try:
+            # Use web search to get current information
+            from .utils import search_web_for_property_knowledge
+            
+            search_results = search_web_for_property_knowledge(user_input)
+            
+            if not search_results:
+                # Fallback to LLM-only response if web search fails
+                return self._generate_llm_knowledge_response(user_input)
+            
+            # Build response using web search results
+            response = self._build_knowledge_response(user_input, search_results)
+            
+            print(f"   ✅ Generated general knowledge response with web search")
+            return response
+            
+        except Exception as e:
+            self._logger.error(f"Failed to handle general knowledge query: {e}")
+            # Fallback to LLM-only response
+            return self._generate_llm_knowledge_response(user_input)
+    
+    def _generate_llm_knowledge_response(self, user_input: str) -> str:
+        """Generate knowledge response using LLM only (fallback)."""
+        prompt = f"""You are a helpful UAE property assistant. Answer this property-related question clearly and concisely.
+
+Question: {user_input}
+
+Provide a clear, helpful explanation in 2-3 paragraphs. Focus on UAE property context where relevant.
+At the end, guide the user back to property search by asking if they'd like to find properties.
+
+Response:"""
+        
+        try:
+            response = self._safe_generate([{"role": "user", "content": prompt}])
+            return response
+        except Exception:
+            return (
+                "I'd be happy to explain that! However, I'm specifically designed to help you find properties to lease in the UAE. "
+                "Would you like to search for properties instead? I can help you find the perfect place based on your needs."
+            )
+    
+    def _build_knowledge_response(self, query: str, search_results: str) -> str:
+        """Build knowledge response using web search results and LLM."""
+        prompt = f"""You are a helpful UAE property assistant. Use the following web search results to answer the user's question.
+
+User Question: {query}
+
+Web Search Results:
+{search_results}
+
+Instructions:
+1. Provide a clear, concise answer based on the search results
+2. Focus on UAE property context where relevant
+3. Keep it brief (2-3 paragraphs maximum)
+4. End by guiding the user back to property search
+5. Use natural, conversational language
+
+Response:"""
+        
+        try:
+            response = self._safe_generate([{"role": "user", "content": prompt}])
+            return response
+        except Exception:
+            return self._generate_llm_knowledge_response(query)
+    
+    def _is_average_price_query(self, user_input: str) -> bool:
+        """Check if user input is asking for average prices."""
+        user_input_lower = user_input.lower().strip()
+        
+        # Check for average price keywords
+        average_keywords = [
+            "average price", "average rent", "average cost",
+            "typical price", "typical rent", "typical cost",
+            "mean price", "mean rent", "mean cost",
+            "average annual rent", "average yearly rent",
+            "what's the average", "what is the average",
+            "how much is the average", "tell me the average",
+            "average pricing", "typical pricing"
+        ]
+        
+        for keyword in average_keywords:
+            if keyword in user_input_lower:
+                print(f"   💰 MATCHED AVERAGE PRICE KEYWORD: '{keyword}'")
+                return True
+        
+        return False
+    
+    def _handle_average_price_query(self, user_input: str) -> str:
+        """Handle average price queries by calculating from database."""
+        print(f"\n💰 HANDLING AVERAGE PRICE QUERY:")
+        print(f"   Query: '{user_input}'")
+        
+        # Get filters from user preferences (location, property type, etc.)
+        filters = self.conversation.get_preferences().copy()
+        print(f"   Using filters from conversation: {filters}")
+        
+        # Get vector store client from pipeline_state
+        try:
+            from .main import pipeline_state
+            vector_store = pipeline_state.vector_store_client
+            
+            if not vector_store:
+                return "I apologize, but I'm unable to calculate average prices right now due to a technical issue. Please try again later."
+            
+            # Calculate average price using Elasticsearch aggregation
+            price_stats = vector_store.calculate_average_price(filters)
+            
+            # Build human-friendly response
+            location = price_stats.get("location_context", "UAE")
+            average = price_stats.get("average", 0)
+            median = price_stats.get("median", 0)
+            min_price = price_stats.get("min", 0)
+            max_price = price_stats.get("max", 0)
+            count = price_stats.get("count", 0)
+            
+            if count == 0:
+                return (
+                    f"I couldn't find any properties matching your criteria to calculate an average price. "
+                    f"Would you like to adjust your search filters or explore different areas?"
+                )
+            
+            # Build response with context
+            response = f"Based on {count} properties currently listed in {location}:\n\n"
+            response += f"📊 **Price Statistics:**\n"
+            response += f"• **Average Annual Rent:** AED {average:,.0f}\n"
+            response += f"• **Median Annual Rent:** AED {median:,.0f}\n"
+            response += f"• **Price Range:** AED {min_price:,.0f} - AED {max_price:,.0f}\n\n"
+            
+            # Add context about the filters
+            if filters:
+                filter_context = []
+                if "property_type_name" in filters:
+                    filter_context.append(f"{filters['property_type_name']}s")
+                if "number_of_bedrooms" in filters:
+                    filter_context.append(f"{filters['number_of_bedrooms']}-bedroom")
+                if "furnishing_status" in filters:
+                    filter_context.append(filters["furnishing_status"])
+                
+                if filter_context:
+                    response += f"*This calculation is based on {', '.join(filter_context)} properties in {location}.*\n\n"
+            
+            response += "Would you like to see specific properties in this price range, or adjust your search criteria?"
+            
+            print(f"   ✅ Generated average price response")
+            return response
+            
+        except Exception as e:
+            self._logger.error(f"Failed to calculate average price: {e}")
+            return (
+                "I apologize, but I encountered an issue calculating the average price. "
+                "Let me help you search for specific properties instead. What are you looking for?"
+            )
 
     def _is_requirement_gathering_request(self, user_input: str) -> bool:
         """Check if user input is requesting requirement gathering."""
@@ -878,6 +1185,212 @@ class LLMClient(BaseLLM):
 
     def _build_intelligent_decision_prompt(self, context: Dict[str, Any]) -> str:
         """Build comprehensive prompt for LLM to make all decisions intelligently."""
+        
+        user_input = context["user_input"]
+        retrieved_chunks = context["retrieved_chunks"]
+        
+        print(f"🤖 LLM DEBUG:")
+        print(f"   User input: '{user_input}'")
+        print(f"   Conversation history: '{context['conversation_history']}'")
+        print(f"   User preferences: {context['user_preferences']}")
+        print(f"   Has property data: {context['has_property_data']}")
+        print(f"   Retrieved chunks count: {len(retrieved_chunks)}")
+        
+        # Build prompt sections modularly
+        sections = [
+            self._build_prompt_header(),
+            self._build_critical_reminder(),
+            self._build_user_query_section(user_input),
+            self._build_conversation_context_section(context),
+            self._build_preferences_context_section(context),
+            self._build_filters_context_section(),
+            self._build_property_context_section(retrieved_chunks),
+            self._build_critical_context_section(),
+            self._build_instructions_section(),
+            self._build_response_format_section()
+        ]
+        
+        # Join non-empty sections
+        prompt = "\n\n".join([s for s in sections if s])
+        return prompt
+    
+    def _build_prompt_header(self) -> str:
+        """Build the header section of the prompt."""
+        return "You are LeaseOasis, a UAE property assistant. Analyze this user query and provide a complete response with intelligent decision making."
+    
+    def _build_critical_reminder(self) -> str:
+        """Build the critical reminder section."""
+        return """CRITICAL REMINDER: When no properties match user criteria, you MUST offer TWO options naturally:
+1) Try alternate searches (nearby locations, flexible budget, different property types)
+2) Gather your requirements (summarize needs and offer to save for the team)
+
+DETECT REQUIREMENT GATHERING REQUESTS:
+- If user says "gather requirement", "save my requirements", "collect my needs", or similar
+- IMMEDIATELY start the requirement gathering process
+- Don't offer alternatives again - they've already chosen to gather requirements
+- Start collecting the required information right away
+
+CONVERSATION STYLE - BE HUMAN:
+- Sound like you're talking to a friend, not a robot
+- Use natural language: "Ah, I see...", "Unfortunately...", "But I can help you..."
+- Use contractions: "I'm", "you're", "don't", "can't", "won't"
+- Be conversational and warm
+- Avoid formal phrases like "I can offer you two options"
+
+EXAMPLES OF WHEN TO OFFER REQUIREMENT GATHERING:
+- User asks for "villa in Sharjah" but no villas exist in Sharjah
+- User asks for "property under 50K" but no properties under 50K exist
+- User asks for "furnished apartment in Dubai Marina" but no furnished apartments exist there
+- User asks for "pet-friendly property" but no pet-friendly properties exist
+- ANY time you cannot find properties matching their specific criteria
+
+ALWAYS end naturally with: "What sounds better to you?" or "What do you think?\""""
+    
+    def _build_user_query_section(self, user_input: str) -> str:
+        """Build the user query section."""
+        return f'USER QUERY: "{user_input}"'
+    
+    def _build_conversation_context_section(self, context: Dict[str, Any]) -> str:
+        """Build the conversation history context section."""
+        conversation_history = context.get("conversation_history", "")
+        if not conversation_history:
+            return ""
+        
+        return f"""CONVERSATION HISTORY:
+{conversation_history}
+
+CRITICAL: Use this conversation history to understand the user's context and build on previous exchanges. If the user previously searched for properties in a location and now adds budget constraints, remember the previous search and filter accordingly. Don't repeat information they've already shared."""
+    
+    def _build_preferences_context_section(self, context: Dict[str, Any]) -> str:
+        """Build the user preferences context section."""
+        user_preferences = context.get("user_preferences", {})
+        if not user_preferences:
+            return ""
+        
+        return f"USER PREFERENCES: {user_preferences}"
+    
+    def _build_filters_context_section(self) -> str:
+        """Build the extracted filters context section."""
+        if not hasattr(self, '_last_extracted_filters') or not self._last_extracted_filters:
+            return ""
+        
+        return f"""EXTRACTED FILTERS FROM QUERY: {self._last_extracted_filters}
+
+CRITICAL: You MUST respect these filters. Only show properties that match these criteria."""
+    
+    def _build_property_context_section(self, retrieved_chunks: List[RetrievedChunk]) -> str:
+        """Build the property data context section."""
+        if not retrieved_chunks:
+            return ""
+        
+        property_context = "PROPERTY DATA AVAILABLE:\n"
+        for i, chunk in enumerate(retrieved_chunks[:5], 1):
+            property_context += f"[Property {i}]\n{chunk.text}\n\n"
+            
+            metadata = chunk.metadata
+            emirate = metadata.get("emirate", "Unknown")
+            property_type = metadata.get("property_type_name", "Unknown")
+            rent_charge = metadata.get("rent_charge", "Unknown")
+            print(f"      Property {i}: {property_type} | {emirate} | AED {rent_charge}")
+        
+        return property_context
+    
+    def _build_critical_context_section(self) -> str:
+        """Build the critical business context section."""
+        return """CRITICAL CONTEXT:
+- You ONLY provide LEASE/RENT properties - NEVER mention buying or purchase options
+- All properties in your database are for rent/lease only
+- Always refer to "rent" or "lease" when discussing properties
+- Never suggest "buying" as an alternative"""
+    
+    def _build_instructions_section(self) -> str:
+        """Build the instructions section."""
+        return """INSTRUCTIONS:
+1. Understand the user's intent and context by analyzing the conversation history
+2. Build on previous exchanges - don't repeat information already shared
+3. Use your intelligence to understand user preferences, budget constraints, and requirements
+4. Analyze the property data and determine what matches the user's needs
+5. CRITICAL: When no properties match their criteria, ALWAYS offer TWO options naturally:
+   a) Try alternate searches (nearby locations, flexible budget, different property types)
+   b) Gather your requirements (summarize needs and offer to save for the team)
+6. Make intelligent decisions about showing sources based on what the user needs
+7. Provide natural, human-like responses that:
+   - Sound like you're talking to a friend, not a robot
+   - Use contractions and natural language
+   - Be conversational and warm
+   - Answer the user's question appropriately
+   - Reference previous conversation when relevant
+   - Show property sources when helpful
+   - Maintain natural conversation flow
+   - Use available property data effectively
+   - ONLY mention rent/lease options, never buying
+
+RESPONSE FORMAT:
+Return your response in this exact JSON format:
+{
+    "answer": "Your natural response to the user",
+    "show_sources": true/false,
+    "reasoning": "Brief explanation of your decision"
+}
+
+SOURCE DECISION GUIDELINES:
+- Show sources (true) when:
+  * User asks for specific properties, listings, or search results
+  * User wants to see "best", "top", or "premium" properties
+  * User asks for alternatives or options
+  * Property data is available and relevant to the query
+  * User is in a property search context
+
+- Don't show sources (false) when:
+  * User greets you (hi, hello, good morning)
+  * User asks for definitions or explanations
+  * User asks for average prices (show calculation only)
+  * User asks about properties outside UAE
+  * No relevant property data is available
+  * User is just confirming or saying thanks
+
+CONVERSATION FLOW:
+- Be natural and conversational - sound like a human friend helping out
+- Use natural language: "Ah, I see...", "Oh, that's interesting...", "Let me help you with that..."
+- Reference previous conversation naturally (e.g., "Since you mentioned you're looking for apartments...")
+- Build on what the user has already shared
+- Ask follow-up questions when appropriate
+- Guide users toward property search when helpful
+- Maintain a warm, helpful personality
+- Avoid robotic phrases and formal language"""
+    
+    def _build_response_format_section(self) -> str:
+        """Build the response format section."""
+        return"""REQUIREMENT GATHERING FEATURE (CRITICAL):
+When no properties match user criteria, you MUST offer both options naturally and conversationally:
+1. "Try alternate searches" - suggest verified alternatives (nearby locations, flexible budget, different property types)
+2. "Gather your requirements" - summarize their needs and offer to save for the team
+
+WHEN USER SAYS "GATHER REQUIREMENT" OR SIMILAR:
+- Immediately start collecting the required information
+- Ask for missing details from the conversation history
+- Required fields: location, property_type_name, number_of_bedrooms, rent_charge, furnishing_status, amenities (optional), lease_duration (optional)
+- If user has already provided some info, acknowledge it and ask for missing pieces
+- Once you have enough info, offer to save it to the team
+
+PROPERTY DATA ANALYSIS:
+- Carefully examine the rent_charge values in the property data
+- If user asks for "under X" and you have properties with rent_charge <= X, mention them
+- If user asks for "above X" and you have properties with rent_charge >= X, mention them
+- Always be accurate about what properties you actually have available
+- Don't say "I don't have any" if the property data shows you do have matching properties
+
+FILTER COMPLIANCE (CRITICAL):
+- ALWAYS respect the extracted filters from the user query
+- If user asks for "apartments" and you have property data, ONLY show properties with property_type_name = "apartment"
+- If user asks for "villas" and you have property data, ONLY show properties with property_type_name = "villa"
+- NEVER show properties that don't match the user's explicit requirements
+- If no properties match the exact filters, explain what you found and suggest alternatives
+
+RESPONSE:"""
+    
+    def _get_llm_intelligent_response_old(self, context: Dict[str, Any]) -> str:
+        """DEPRECATED: Old implementation kept for reference."""
         
         user_input = context["user_input"]
         conversation_history = context["conversation_history"]
@@ -1078,8 +1591,6 @@ FILTER COMPLIANCE (CRITICAL):
 - If a property has property_type_name = "penthouse" but user asked for "apartments", DO NOT include it in your response
 
 RESPONSE:"""
-
-        return prompt
 
     def _parse_llm_response(self, llm_response: str) -> tuple[str, bool]:
         """Parse LLM response to extract answer and source decision."""
@@ -1422,7 +1933,23 @@ If a field is not mentioned, omit it from the JSON. Only include fields that are
             return self._send_requirements_to_endpoint(requirement_summary)
     
     def _send_requirements_to_endpoint(self, requirements: Dict[str, Any]) -> str:
-        """Send requirements to the backend endpoint with retry logic and fallback storage"""
+        """Send requirements to the backend endpoint with retry logic and fallback storage.
+        
+        BACKEND API CONTRACT:
+        Expected fields (all optional):
+        - session_id (str): Conversation session identifier
+        - location (str): Location preference (emirate/city/community)
+        - property_type (str): Type of property (apartment, villa, studio, etc.)
+        - number_of_bedrooms (int): Number of bedrooms
+        - rent_charge (float): Budget for annual rent
+        - furnishing_status (str): Furnished, semi-furnished, unfurnished
+        - amenities (List[str]): List of amenities (gym, pool, parking, etc.)
+        - nearby_landmarks (str): Nearby landmarks preference
+        - building_name (str): Specific building name
+        - rent_type (str): Lease/Holiday Home/Management Fees
+        
+        NOTE: If your backend controller uses different field names, update the mapping below.
+        """
         
         endpoint = self._config.requirement_gathering.endpoint or "http://localhost:5000/backend/api/v1/user/requirement"
         
@@ -1437,25 +1964,39 @@ If a field is not mentioned, omit it from the JSON. Only include fields that are
         # Merge extracted requirements with preferences (extracted takes priority)
         merged_data = {**preferences, **extracted_requirements}
         
-        # Map to backend controller field names
+        # CRITICAL: Map RAG field names to backend controller field names
+        # If your backend uses different naming conventions, update this mapping
         backend_payload = {
             "session_id": requirements.get("session_id", ""),
+            # Location mapping - handles emirate, city, or community
             "location": self._extract_location(merged_data),
+            # Property type mapping - maps property_type_name → property_type
             "property_type": merged_data.get("property_type_name"),
+            # Direct mappings
             "number_of_bedrooms": merged_data.get("number_of_bedrooms"),
+            # Rent charge - extracts value from range if needed
             "rent_charge": self._extract_rent_charge_value(merged_data),
             "furnishing_status": merged_data.get("furnishing_status"),
+            # Amenities - aggregates from boolean fields and amenities list
             "amenities": self._extract_amenities(merged_data),
             "nearby_landmarks": merged_data.get("nearby_landmarks"),
             "building_name": merged_data.get("building_name"),
-            "rent_type": merged_data.get("rent_type_name")
+            # Rent type mapping - maps rent_type_name → rent_type
+            "rent_type": merged_data.get("rent_type_name"),
+            # Additional fields for context
+            "conversation_summary": requirements.get("conversation_summary", ""),
+            "timestamp": requirements.get("timestamp", time.time())
         }
+        
+        # Remove None values to keep payload clean
+        backend_payload = {k: v for k, v in backend_payload.items() if v is not None}
         
         print(f"   🔄 TRANSFORMED PAYLOAD FOR BACKEND:")
         print(f"      Original extracted_requirements: {extracted_requirements}")
         print(f"      Original preferences: {preferences}")
         print(f"      Merged data: {merged_data}")
         print(f"      Backend payload: {backend_payload}")
+        print(f"      Payload size: {len(str(backend_payload))} bytes")
         
         enhanced_requirements = backend_payload
         retry_attempts = 3
@@ -1594,39 +2135,23 @@ If a field is not mentioned, omit it from the JSON. Only include fields that are
         return None
     
     def _extract_amenities(self, merged_data: Dict[str, Any]) -> List[str]:
-        """Extract amenities from merged data"""
+        """Extract features/amenities from merged data using config (domain-agnostic)"""
         amenities = []
         
         # Check for amenities list
         if "amenities" in merged_data and isinstance(merged_data["amenities"], list):
             amenities.extend(merged_data["amenities"])
         
-        # Check for individual amenity boolean fields
-        amenity_fields = [
-            "gym_fitness_center", "swimming_pool", "parking", "balcony_terrace",
-            "beach_access", "elevators", "security_available", "concierge_available",
-            "maids_room", "laundry_room", "storage_room", "bbq_area", "pet_friendly",
-            "central_ac_heating", "smart_home_features", "waste_disposal_system",
-            "power_backup", "mosque_nearby", "jogging_cycling_tracks", "chiller_included",
-            "sublease_allowed", "childrens_play_area"
-        ]
+        # Check for individual boolean fields from config
+        from .config import get_settings
+        settings = get_settings()
+        feature_config = settings.database.boolean_fields or {}
         
-        for field in amenity_fields:
+        for field, display_label in feature_config.items():
             if merged_data.get(field) is True:
-                # Convert field name to user-friendly name
-                amenity_name = field.replace("_", " ").replace("fitness center", "gym")
-                if field == "gym_fitness_center":
-                    amenity_name = "gym"
-                elif field == "swimming_pool":
-                    amenity_name = "pool"
-                elif field == "balcony_terrace":
-                    amenity_name = "balcony"
-                elif field == "childrens_play_area":
-                    amenity_name = "children play area"
-                
-                amenities.append(amenity_name)
+                amenities.append(display_label)
         
-        return amenities
+        return list(set(amenities))  # Remove duplicates
 
     def _save_to_fallback_storage(self, requirements: Dict[str, Any]) -> None:
         """Save requirements to fallback storage when endpoint fails"""

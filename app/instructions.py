@@ -990,49 +990,50 @@ Return JSON only (no additional text):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 PLAIN_TEXT_DESCRIPTION_TEMPLATE = """
-You are creating a professional plain text description of property requirements.
+You are creating a comprehensive, professional description for an admin to understand exactly what the user wants.
 
 EXTRACTED PROPERTY REQUIREMENTS:
 {requirements}
 
 TASK:
-Generate a SINGLE PARAGRAPH that summarizes ALL property requirements in a flowing narrative format.
+Write a clear, professional description that summarizes all user requirements in natural language.
 
-FORMAT RULES:
-- Write as ONE natural paragraph (2-3 sentences max)
-- NO bullet points
-- NO lists  
-- NO sections or headers
-- NO "Property Requirements:" label
-- NO "Conversation Context:" section
-- Just flowing narrative text
-- Include ALL requirements mentioned
+YOUR GOAL:
+Help the admin quickly understand the complete requirement including property type, location, budget constraints, lease duration, amenities, and any special preferences.
 
-EXAMPLE CORRECT OUTPUT:
-"Requirement gathering for a furnished 2-bedroom apartment in Dubai Downtown with a budget under 150,000 AED annually and a lease of at least 5 years. Key highlights include access to a pool, gym, and one parking spot."
+WRITING GUIDELINES:
+- Write in flowing paragraph format (provide full details for admin review)
+- Be accurate to the user's specifications (preserve exact budget constraints as stated)
+- Include all amenities and features mentioned
+- Use clear, professional, grammatically correct language
+- Remove duplicate information (treat similar terms as the same item)
+- Group related items together naturally
+- Make it comprehensive and easy to understand
 
-EXAMPLE WRONG OUTPUT:
-"Property Requirements:
-- Location: Dubai
-- Type: Apartment...
+LANGUAGE STYLE:
+Use natural, professional English with proper grammar and sentence structure. Avoid redundancy where you mention something and then repeat it again in another form. Present information clearly and logically.
 
-Conversation Context:
-User said..."
+EXAMPLES:
 
-DO NOT:
-- Don't use bullet points or lists
-- Don't use "Property Requirements:" header
-- Don't write conversation history
-- Don't use key-value format
-- Don't add extra sections
+Example 1:
+"Requirement for a fully furnished 3-bedroom villa in Ajman with an annual budget of 200,000 AED for a lease duration of 3 years. Required amenities include gym, pool, parking, and balcony."
 
-DO:
-- Write ONE flowing paragraph
-- Include all requirements naturally
-- Use professional language
-- Be concise but complete
+Example 2:
+"Requirement for a 2-bedroom apartment in Dubai Downtown with a budget under 150,000 AED annually for at least 5 years. The property should include amenities such as pool, gym, and one parking spot."
 
-Generate ONLY the single narrative paragraph now:
+Example 3:
+"Requirement for an unfurnished studio in Sharjah with a budget above 80,000 AED per year for a 2-year lease. Essential amenities include parking and access to a gym."
+
+Example 4:
+"Requirement for a semi-furnished 4-bedroom villa in Abu Dhabi with a budget between 180,000-220,000 AED annually for a minimum 3-year lease. Required amenities include pool, gym, maid's room, garden, and 2 parking spaces."
+
+FORMAT REQUIREMENTS:
+- Write as flowing paragraph format
+- No bullet points or section headers
+- Professional and grammatically correct
+- Clear and comprehensive for administrative review
+
+Generate the description now:
 """
 
 # ═══════════════════════════════════════════════════════════════════════════════

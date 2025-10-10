@@ -4,7 +4,8 @@ import time
 from typing import Any, Dict, List, Optional
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
-from .query_processor import preprocess_query
+# Query processor removed - using pure semantic search + LLM intelligence
+# from .query_processor import preprocess_query
 from .chunking import chunk_documents
 from .config import Settings, get_settings
 from .core.base import BaseEmbedder, BaseVectorStore, BaseLLM
@@ -14,7 +15,6 @@ from .models import RetrievedChunk
 from .retriever import Retriever
 from .utils import get_logger
 from .factories import build_embedder, build_llm, build_vector_store
-from .monitoring import get_metrics_collector, get_error_handler, get_performance_monitor, QueryMetrics
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime, timedelta
 from collections import defaultdict
@@ -271,23 +271,31 @@ pipeline_state = PipelineState()
 from datetime import datetime, timedelta
 
 class SessionManager:
+    """Manages LLM client sessions for multi-user conversations"""
+    
     def __init__(self, ttl_minutes: int = 30):
-        self.sessions = {}
-        self.last_activity = {}
+        self.sessions: Dict[str, Any] = {}
+        self.last_activity: Dict[str, datetime] = {}
         self.ttl = timedelta(minutes=ttl_minutes)
     
     def get_or_create_session(self, session_id: str):
+        """Get or create an LLM client for a session"""
         self._cleanup_expired()
+        
         if session_id not in self.sessions:
             from .factories import build_llm
+            # Create new LLM client for this session
             self.sessions[session_id] = build_llm(
                 pipeline_state.settings.llm,
                 fallback_api_key=pipeline_state.settings.embedding.api_key
             )
+            logger.debug(f"Created new session: {session_id}")
+        
         self.last_activity[session_id] = datetime.now()
         return self.sessions[session_id]
     
     def _cleanup_expired(self):
+        """Remove expired sessions"""
         now = datetime.now()
         expired = [
             sid for sid, last in self.last_activity.items()
@@ -297,6 +305,13 @@ class SessionManager:
             del self.sessions[sid]
             del self.last_activity[sid]
             logger.debug(f"Cleaned up expired session: {sid}")
+    
+    def clear_session(self, session_id: str):
+        """Clear a specific session"""
+        if session_id in self.sessions:
+            del self.sessions[session_id]
+            del self.last_activity[session_id]
+            logger.debug(f"Cleared session: {session_id}")
 
 # Replace global conversation_sessions with:
 session_manager = SessionManager(ttl_minutes=30)
@@ -465,20 +480,16 @@ async def on_startup() -> None:
     tags=["Query"]
 )
 async def query_endpoint(request: QueryRequest, http_request: Request) -> QueryResponse:
-    """Main query endpoint with comprehensive error handling and monitoring.
+    """
+    Simplified query endpoint using generic LLM intelligence.
     
-    This endpoint:
-    1. Validates input and system state
-    2. Preprocesses query to extract filters
-    3. Retrieves relevant property chunks from vector database
-    4. Generates LLM response with intelligent source decision
-    5. Applies strict filter compliance
-    6. Returns answer with sources (if applicable)
-    
-    Error handling:
-    - Returns user-friendly messages for all error types
-    - Logs all errors for debugging
-    - Tracks metrics for monitoring
+    Flow:
+    1. Validate input
+    2. Get/create session LLM client
+    3. Extract filters from query (optional)
+    4. Retrieve relevant chunks from database
+    5. Let LLM handle everything (greetings, searches, alternatives, etc.)
+    6. Return response with sources
     """
     # Rate limiting check
     client_ip = http_request.client.host if http_request.client else "unknown"
@@ -494,219 +505,139 @@ async def query_endpoint(request: QueryRequest, http_request: Request) -> QueryR
     error_handler = get_error_handler()
     performance_monitor = get_performance_monitor()
     
-    # Start timing the entire query
+    # Start timing
     query_id = f"query_{int(time.time() * 1000)}"
     performance_monitor.start_timer(query_id)
     
     try:
-        # Validation checks
+        # Validation
         if not (pipeline_state.retriever_client and pipeline_state.llm_client):
-            logger.error("Query endpoint called but pipeline not initialized")
+            logger.error("Pipeline not initialized")
             raise HTTPException(status_code=500, detail=SERVER_NOT_INITIALIZED)
         
         if not request.query or not request.query.strip():
-            logger.debug(f"Empty query received from session {request.session_id}")
             raise HTTPException(status_code=400, detail="Query must not be empty")
         
-        logger.debug(f"Processing query: {request.query[:100]} | Session: {request.session_id} | Query ID: {query_id}")
-        
-        logger.debug(f"\n QUERY ENDPOINT HIT:")
-        logger.debug(f"   Query ID: {query_id}")
-        logger.debug(f"   Session ID: {request.session_id}")
-        logger.debug(f"   Raw Query: '{request.query}'")
-        logger.debug(f"   Top K: {request.top_k}")
-        
-        # FIXED: Use session_id properly
         session_id = request.session_id or "default"
+        logger.debug(f"Query: '{request.query[:100]}' | Session: {session_id}")
         
-        # Create/get session-specific LLM client with error handling
+        # Get/create session-specific LLM client
         try:
             llm_client = session_manager.get_or_create_session(session_id)
-            logger.debug(f"   LLM Client: {type(llm_client).__name__}")
         except Exception as exc:
-            logger.error(f"Failed to create/get session {session_id}: {exc}")
-            raise HTTPException(status_code=500, detail="Failed to initialize conversation session")
+            logger.error(f"Failed to create session: {exc}")
+            raise HTTPException(status_code=500, detail="Failed to initialize session")
         
-        # CRITICAL: Use the session LLM client, not pipeline_state.llm_client
-        logger.debug(f"\n PREPROCESSING QUERY:")
+        # Pure semantic search - NO filter extraction!
+        # LLM will understand and filter mentally
+        chunks = []
         try:
-            normalized_query, filters = preprocess_query(request.query, llm_client)
-            logger.debug(f"   Normalized Query: '{normalized_query}'")
-            logger.debug(f"   Extracted Filters: {filters}")
-            logger.debug(f"Query preprocessing successful - Filters: {filters}")
-        except Exception as exc:
-            logger.error(f"Query preprocessing failed: {exc}")
-            # Continue with original query if preprocessing fails
-            normalized_query = request.query
-            filters = {}
-        
-        # Store extracted filters in LLM client for context
-        if hasattr(llm_client, '_last_extracted_filters'):
-            llm_client._last_extracted_filters = filters
-        
-        logger.debug(f"\n INTENT DETECTION:")
-        logger.debug(f"   Has search memory: {llm_client.conversation.has_search_memory()}")
-        
-        # If LLM has search memory, check intent
-        if llm_client.conversation.has_search_memory():
-            try:
-                intent = llm_client.detect_query_intent(normalized_query)
-                intent_type = intent.get("intent", "NEW_SEARCH")
-                logger.debug(f"   Intent: {intent_type}")
-                logger.debug(f"   Reasoning: {intent.get('reasoning')}")
-                
-                if intent_type == "REFINEMENT":
-                    logger.debug(f"   REFINEMENT DETECTED - Skipping retrieval (LLM will filter internally)")
-                    # LLM will handle refinement internally using stored candidates
-                    chunks = []  # Empty chunks - LLM won't use these
-                else:
-                    logger.debug(f"   NEW_SEARCH or CLARIFICATION - Performing retrieval")
-                    # Clear search memory for new search
-                    llm_client.conversation.clear_search_memory()
-                    # Perform new retrieval
-                    try:
-                        chunks_display, chunks_all = pipeline_state.retriever_client.retrieve(
-                            normalized_query,
-                            filters=filters,
-                            top_k=request.top_k,
-                            retrieve_for_refinement=True  # Get extra candidates for future refinement
-                        )
-                        chunks = chunks_display
-                        logger.debug(f"   Retrieved {len(chunks_display)} to display, {len(chunks_all)} to store")
-                        
-                        # Store search results temporarily (will finalize after LLM classification)
-                        llm_client._temp_search_results = {
-                            "query": normalized_query,
-                            "candidates": chunks_all,
-                            "filters": filters
-                        }
-                        logger.debug(f"   Stored {len(chunks_all)} candidates temporarily (will finalize after LLM classification)")
-                    except Exception as exc:
-                        logger.error(f"Retrieval failed: {exc}")
-                        chunks = []
-                        
-            except Exception as exc:
-                logger.error(f"Intent detection failed: {exc}, assuming NEW_SEARCH")
-                # Fallback to standard retrieval
-                try:
-                    chunks_display, chunks_all = pipeline_state.retriever_client.retrieve(
-                        normalized_query,
-                        filters=filters,
-                        top_k=request.top_k,
-                        retrieve_for_refinement=True
-                    )
-                    chunks = chunks_display
-                    llm_client._temp_search_results = {
-                        "query": normalized_query,
-                        "candidates": chunks_all,
-                        "filters": filters
-                    }
-                except Exception as exc2:
-                    logger.error(f"Fallback retrieval failed: {exc2}")
-                    chunks = []
-        else:
-            # No search memory - this is definitely a new search
-            logger.debug(f"   No search memory - NEW SEARCH")
-            try:
-                chunks_display, chunks_all = pipeline_state.retriever_client.retrieve(
-                    normalized_query,
-                    filters=filters,
-                    top_k=request.top_k,
-                    retrieve_for_refinement=True  # Get extra candidates for future refinement
-                )
-                chunks = chunks_display
-                logger.debug(f"   Retrieved {len(chunks_display)} to display, {len(chunks_all)} to store")
-                
-                # CRITICAL FIX: Only store if this is a real entity search (not greeting/general)
-                # We'll let LLM decide after classification if we should store or not
-                # For now, store temporarily - will be cleared if not entity_search
-                llm_client._temp_search_results = {
-                    "query": normalized_query,
-                    "candidates": chunks_all,
-                    "filters": filters
-                }
-                logger.debug(f"   Stored {len(chunks_all)} candidates temporarily (will finalize after LLM classification)")
-            except Exception as exc:
-                logger.error(f"Retrieval failed: {exc}")
-                chunks = []
-                logger.debug("Continuing with empty chunks due to retrieval failure")
-        
-        # Use session-specific LLM client for chat - LLM determines if sources should be shown
-        logger.debug(f"\n LLM PROCESSING:")
-        try:
-            answer, should_show_sources = llm_client.chat_with_source_decision(normalized_query, retrieved_chunks=chunks)
-            logger.debug(f"   Answer Length: {len(answer)} characters")
-            logger.debug(f"   Should Show Sources: {should_show_sources}")
-            logger.debug(f"LLM processing successful - Sources shown: {should_show_sources}")
+            top_k = request.top_k or pipeline_state.settings.retrieval.top_k or 20  # Increased to 20 for better coverage
+            logger.info(f"🔍 MAIN: Starting semantic search with top_k={top_k}...")
             
-            # CRITICAL FIX: Check if refinement handler stored filtered chunks
-            if hasattr(llm_client, '_refinement_result_chunks'):
-                chunks = llm_client._refinement_result_chunks
-                logger.debug(f"   Using refinement result chunks: {len(chunks)} chunks")
-                delattr(llm_client, '_refinement_result_chunks')  # Clean up
-            else:
-                logger.debug(f"   Using original retrieval chunks: {len(chunks)} chunks")
-                
-        except Exception as exc:
-            logger.error(f"LLM processing failed: {exc}")
-            # Provide fallback response
-            answer = (
-                "I apologize, but I encountered an issue processing your query. "
-                "Please try rephrasing your question or contact support if the issue persists."
+            # Pure semantic search - no filters, just vector similarity
+            chunks_display, _ = pipeline_state.retriever_client.retrieve(
+                request.query,
+                filters={},  # NO FILTERS - pure semantic search!
+                top_k=top_k,
+                retrieve_for_refinement=False
             )
-            should_show_sources = False
-            chunks = []  # Clear chunks to avoid showing potentially incorrect data
-        
-        # Check if this is a requirement gathering request
-        if "REQUIREMENT_GATHERING_DETECTED" in answer or "gather requirement" in normalized_query.lower() or "save my requirements" in normalized_query.lower():
-            logger.debug(f"    REQUIREMENT GATHERING DETECTED IN QUERY!")
-            logger.debug(f"   Query: '{normalized_query}'")
-            logger.debug(f"   Answer contains requirement gathering: {'REQUIREMENT_GATHERING_DETECTED' in answer}")
-        
-        # Filter sources based on LLM decision and extracted filters
-        if should_show_sources:
-            filtered_chunks = [c for c in chunks if getattr(c, "score", 1.0) >= 0.7]
+            chunks = chunks_display
+            logger.info(f"🔍 MAIN: Semantic search retrieved {len(chunks)} chunks")
             
-            # Apply additional filtering based on extracted filters
-            if filters:
-                filtered_chunks = _apply_filter_compliance(filtered_chunks, filters)
-                logger.debug(f"   Applied filter compliance, remaining chunks: {len(filtered_chunks)}")
+            # Log chunk details
+            for i, chunk in enumerate(chunks):
+                logger.debug(f"🔍 MAIN: Chunk {i+1}: {chunk.metadata.get('property_title', 'Unknown')} "
+                           f"(ID: {chunk.metadata.get('id', 'unknown')}, Score: {chunk.score:.3f})")
+                
+        except Exception as exc:
+            logger.error(f"🔍 MAIN: Retrieval failed: {exc}")
+            # Continue with empty chunks - LLM can still handle greetings, etc.
+        
+        # Let LLM handle everything - it decides how to respond
+        logger.debug(f"🔍 MAIN: Calling LLM chat...")
+        try:
+            answer = llm_client.chat(request.query, retrieved_chunks=chunks)
+            logger.debug(f"🔍 MAIN: LLM response: {len(answer)} chars")
+            logger.debug(f"🔍 MAIN: LLM response content: {answer}")
             
-            sources: List[SourceItem] = [
+            # Check if LLM triggered requirement collection
+            if "COLLECT_REQUIREMENTS" in answer:
+                logger.debug("Requirement collection triggered by LLM")
+                
+                # Extract and send requirements (LLM handles everything)
+                result = llm_client.collect_and_send_requirements()
+                
+                # Let LLM decide the response message based on success/failure
+                if result.get("success"):
+                    logger.debug(f"Requirements sent successfully to API")
+                    # LLM will provide the success message in its response
+                    # Just remove the trigger from the answer
+                    answer = answer[:answer.find("COLLECT_REQUIREMENTS")].strip()
+                    if not answer:
+                        answer = "Perfect! I've saved your requirements. We'll reach out as soon as we find matching properties. Thank you!"
+                else:
+                    logger.error(f"Failed to send requirements: {result.get('error')}")
+                    # LLM will handle the error message
+                    answer = answer[:answer.find("COLLECT_REQUIREMENTS")].strip()
+                    if not answer:
+                        answer = "I've noted your requirements. However, there was a technical issue. Please try again or contact support."
+                
+        except Exception as exc:
+            logger.error(f"LLM chat failed: {exc}")
+            answer = (
+                "I apologize, but I encountered an issue processing your request. "
+                "Please try again or rephrase your question."
+            )
+        
+        # Store search results for progressive filtering
+        if chunks:
+            property_ids = [chunk.metadata.get("id") for chunk in chunks if chunk.metadata.get("id")]
+            llm_client.conversation.store_search_results(property_ids)
+            logger.debug(f"🔍 MAIN: Stored {len(property_ids)} property IDs for progressive filtering")
+        
+        # Prepare sources - ALWAYS show if we have chunks and answer mentions properties
+        sources: List[SourceItem] = []
+        
+        # Check if answer contains property information (not just greetings)
+        property_indicators = ["bedroom", "property", "apartment", "villa", "townhouse", "aed", "rent", "found"]
+        has_property_content = any(indicator in answer.lower() for indicator in property_indicators)
+        
+        if chunks and has_property_content:
+            # Show ALL retrieved chunks as sources
+            sources = [
                 SourceItem(score=c.score, text=c.text, metadata=c.metadata)
-                for c in filtered_chunks
+                for c in chunks[:10]  # Top 10 sources
             ]
-            logger.debug(f"   Final filtered sources: {len(sources)}")
-        else:
-            sources = []
-            logger.debug(f"   No sources shown (LLM decision)")
+            logger.debug(f"Showing {len(sources)} sources")
         
         # Calculate processing time
         processing_time_ms = performance_monitor.end_timer(query_id)
         
-        # Record successful query metrics
+        # Record metrics
         metrics = QueryMetrics(
             query_id=query_id,
             session_id=session_id,
             query_text=request.query,
-            query_category="property_search",  # Could be enhanced to detect category
+            query_category="auto",  # LLM handles categorization
             processing_time_ms=processing_time_ms,
             chunks_retrieved=len(chunks),
             chunks_filtered=len(sources),
-            sources_shown=should_show_sources
+            sources_shown=len(sources) > 0
         )
         metrics_collector.record_query(metrics)
         
-        logger.debug(f"\n RESPONSE READY:")
-        logger.debug(f"   Answer: {answer[:100]}...")
-        logger.debug(f"   Sources Count: {len(sources)}")
-        logger.debug(f"   Processing Time: {processing_time_ms:.0f}ms")
+        logger.debug(f"Response ready ({processing_time_ms:.0f}ms)")
         
         return QueryResponse(answer=answer, sources=sources)
         
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions as-is
     except Exception as e:
-        # Handle errors gracefully
+        # Handle unexpected errors gracefully
         processing_time_ms = performance_monitor.end_timer(query_id)
+        
+        logger.error(f"Query endpoint error: {e}", exc_info=True)
         
         # Record error metrics
         metrics = QueryMetrics(
@@ -723,7 +654,7 @@ async def query_endpoint(request: QueryRequest, http_request: Request) -> QueryR
         )
         metrics_collector.record_query(metrics)
         
-        # Return user-friendly error response
+        # Return user-friendly error
         error_message = error_handler.handle_query_error(e, request.query, request.session_id or "default")
         return QueryResponse(answer=error_message, sources=[])
 
@@ -737,126 +668,6 @@ def _get_vector_dimensions() -> int:
     if pipeline_state.vector_store_client and pipeline_state.vector_store_client._config.dims:
         return int(pipeline_state.vector_store_client._config.dims)
     return pipeline_state.embedder_client.get_dimension()
-
-def _apply_filter_compliance(chunks: List[RetrievedChunk], filters: Dict[str, Any]) -> List[RetrievedChunk]:
-    """Apply STRICT filter compliance to ensure sources match ALL extracted filters.
-    
-    This validates:
-    - Exact matches for keywords (property_type, emirate, city, community, furnishing_status)
-    - Numeric ranges for rent_charge, bedrooms, bathrooms, property_size
-    - Boolean matches for amenities
-    - Date comparisons for availability
-    """
-    from .config import get_settings
-    
-    if not filters:
-        return chunks
-    
-    settings = get_settings()
-    field_types = settings.database.field_types or {}
-    
-    logger.debug(f"\n STRICT FILTER COMPLIANCE CHECK:")
-    logger.debug(f"   Input chunks: {len(chunks)}")
-    logger.debug(f"   Filters to validate: {filters}")
-    
-    filtered_chunks = []
-    
-    for chunk in chunks:
-        metadata = chunk.metadata
-        include_chunk = True
-        property_title = metadata.get('property_title', 'Unknown')
-        
-        for filter_key, filter_value in filters.items():
-            if not include_chunk:
-                break  # Skip remaining checks if already excluded
-            
-            if filter_value is None:
-                continue  # Skip None filters
-            
-            field_type = field_types.get(filter_key, "keyword")
-            actual_value = metadata.get(filter_key)
-            
-            # KEYWORD/TEXT FILTERS (Exact match)
-            if field_type in ("keyword", "text"):
-                if isinstance(filter_value, list):
-                    # Multiple acceptable values (OR logic)
-                    if actual_value not in filter_value:
-                        logger.debug(f"    {property_title} - {filter_key} mismatch: {actual_value} not in {filter_value}")
-                        include_chunk = False
-                else:
-                    # Single value (exact match, case-insensitive for keywords)
-                    expected = str(filter_value).lower()
-                    actual = str(actual_value).lower() if actual_value else ""
-                    if actual != expected:
-                        logger.debug(f"    {property_title} - {filter_key} mismatch: {actual} != {expected}")
-                        include_chunk = False
-            
-            # NUMERIC FILTERS (Integer/Float with range support)
-            elif field_type in ("integer", "float"):
-                if isinstance(filter_value, dict):
-                    # Range query (gte, lte, gt, lt)
-                    actual_num = float(actual_value) if actual_value is not None else None
-                    
-                    if actual_num is None:
-                        logger.debug(f"    {property_title} - {filter_key} missing or None")
-                        include_chunk = False
-                    else:
-                        # Check each range bound
-                        if "gte" in filter_value and actual_num < filter_value["gte"]:
-                            logger.debug(f"    {property_title} - {filter_key} too low: {actual_num} < {filter_value['gte']}")
-                            include_chunk = False
-                        if "lte" in filter_value and actual_num > filter_value["lte"]:
-                            logger.debug(f"    {property_title} - {filter_key} too high: {actual_num} > {filter_value['lte']}")
-                            include_chunk = False
-                        if "gt" in filter_value and actual_num <= filter_value["gt"]:
-                            logger.debug(f"    {property_title} - {filter_key} not greater: {actual_num} <= {filter_value['gt']}")
-                            include_chunk = False
-                        if "lt" in filter_value and actual_num >= filter_value["lt"]:
-                            logger.debug(f"    {property_title} - {filter_key} not less: {actual_num} >= {filter_value['lt']}")
-                            include_chunk = False
-                else:
-                    # Exact numeric match
-                    expected_num = float(filter_value)
-                    actual_num = float(actual_value) if actual_value is not None else None
-                    if actual_num != expected_num:
-                        logger.debug(f"    {property_title} - {filter_key} mismatch: {actual_num} != {expected_num}")
-                        include_chunk = False
-            
-            # BOOLEAN FILTERS (Amenities)
-            elif field_type == "boolean":
-                if filter_value is True:
-                    # If filter requires True, actual must be True
-                    if actual_value is not True:
-                        logger.debug(f"    {property_title} - {filter_key} not available: {actual_value}")
-                        include_chunk = False
-                # Note: We don't filter on False (user wants it, doesn't matter if property has it or not)
-            
-            # DATE FILTERS (String comparison for ISO dates)
-            elif filter_key in ["available_from", "lease_start_date", "lease_end_date", "listing_date"]:
-                if isinstance(filter_value, dict):
-                    # Range query for dates
-                    if "lte" in filter_value:
-                        # available_from should be on or before filter date
-                        if actual_value and actual_value > filter_value["lte"]:
-                            logger.debug(f"    {property_title} - {filter_key} too late: {actual_value} > {filter_value['lte']}")
-                            include_chunk = False
-                    if "gte" in filter_value:
-                        # available_from should be on or after filter date
-                        if actual_value and actual_value < filter_value["gte"]:
-                            logger.debug(f"    {property_title} - {filter_key} too early: {actual_value} < {filter_value['gte']}")
-                            include_chunk = False
-                else:
-                    # Exact date match
-                    if actual_value != filter_value:
-                        logger.debug(f"    {property_title} - {filter_key} mismatch: {actual_value} != {filter_value}")
-                        include_chunk = False
-        
-        if include_chunk:
-            filtered_chunks.append(chunk)
-            logger.debug(f"    {property_title} - PASSES all filters")
-    
-    logger.debug(f"   Final compliant chunks: {len(filtered_chunks)}/{len(chunks)}")
-    return filtered_chunks
 
 def _process_documents_to_vectors(documents: List[Any], settings: Settings) -> tuple[List[Any], List[List[float]]]:
     """Process documents through chunking and embedding pipeline"""

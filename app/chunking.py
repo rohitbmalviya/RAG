@@ -65,12 +65,12 @@ def _validate_document_content(doc: Document, unit: str, logger) -> bool:
     doc_id = getattr(doc, "id", "<unknown>")
     if unit == CHAR_UNIT:
         if not doc.text:
-            logger.warning("Document %s has empty text; skipping chunking", doc_id)
+            logger.debug("Document %s has empty text; skipping chunking", doc_id)
             return False
     else:
         tokens = _split_text_to_tokens(doc.text)
         if not tokens:
-            logger.warning("Document %s has no tokens; skipping chunking", doc_id)
+            logger.debug("Document %s has no tokens; skipping chunking", doc_id)
             return False
     return True
 
@@ -98,11 +98,11 @@ def chunk_documents(
     logger = get_logger(__name__)
     # Validate parameters
     if chunk_size is None or chunk_size <= 0:
-        logger.warning("chunk_documents called with invalid chunk_size=%s", chunk_size)
+        logger.debug("chunk_documents called with invalid chunk_size=%s", chunk_size)
     if chunk_overlap is None or chunk_overlap < 0:
-        logger.warning("chunk_documents called with invalid chunk_overlap=%s", chunk_overlap)
+        logger.debug("chunk_documents called with invalid chunk_overlap=%s", chunk_overlap)
     if unit not in {TOKEN_UNIT, CHAR_UNIT}:
-        logger.warning("chunk_documents received unknown unit='%s'; defaulting to 'token' logic", unit)
+        logger.debug("chunk_documents received unknown unit='%s'; defaulting to 'token' logic", unit)
     
     chunked: List[Document] = []
     for doc in documents:

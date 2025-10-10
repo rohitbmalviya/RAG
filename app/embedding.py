@@ -36,7 +36,7 @@ class BaseEmbeddingProvider:
     def _check_api_key(self, provider_name: str) -> None:
         """Check and warn about missing API key."""
         if not self._config.api_key:
-            self._logger.warning("Embedding API key missing for %s provider", provider_name)
+            self._logger.debug("Embedding API key missing for %s provider", provider_name)
     
     def _handle_import_error(self, package_name: str, exc: Exception) -> None:
         """Handle import errors with consistent messaging."""
@@ -104,7 +104,7 @@ class EmbeddingClient(BaseEmbedder):
         if provider_cls is None:
             raise ValueError(f"Unsupported embedding provider: {config.provider}")
         if not config.model:
-            self._logger.warning("Embedding model is not set; API calls may fail")
+            self._logger.debug("Embedding model is not set; API calls may fail")
 
         self._provider_client = provider_cls(config)
     

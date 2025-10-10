@@ -193,11 +193,13 @@ class VectorStoreClient(BaseVectorStore):
         index = self._get_index_name()
         settings = get_settings()
         
-        self._logger.debug(f" VECTOR STORE SEARCH DEBUG:")
-        self._logger.debug(f" Index: {index}")
-        self._logger.debug(f" Top K: {top_k}")
-        self._logger.debug(f" Num Candidates: {num_candidates}")
-        self._logger.debug(f" Filters received: {filters}")
+        self._logger.debug(f"🔍 VECTOR_DB: Starting vector search")
+        self._logger.debug(f"🔍 VECTOR_DB: Index: {index}")
+        self._logger.debug(f"🔍 VECTOR_DB: Top K: {top_k}")
+        self._logger.debug(f"🔍 VECTOR_DB: Num Candidates: {num_candidates}")
+        self._logger.debug(f"🔍 VECTOR_DB: Filters received: {filters}")
+        self._logger.debug(f"🔍 VECTOR_DB: Query vector length: {len(query_vector)}")
+        
         knn = {
             "field": "embedding",
             "query_vector": query_vector,
@@ -209,15 +211,15 @@ class VectorStoreClient(BaseVectorStore):
         
         if filters:
             allowed = set(settings.retrieval.filter_fields or [])
-            self._logger.debug(f" Allowed filter fields: {sorted(list(allowed))}")
+            self._logger.debug(f"🔍 VECTOR_DB: Allowed filter fields: {sorted(list(allowed))}")
             for key, value in filters.items():
                 if key not in allowed or value is None:
-                    self._logger.debug(f" Skipping filter {key}: not allowed or None")
+                    self._logger.debug(f"🔍 VECTOR_DB: Skipping filter {key}: not allowed or None")
                     continue
                 
                 # Use consistent field mapping - all filters go to metadata unless specified otherwise
                 filter_key = f"metadata.{key}"
-                self._logger.debug(f" Processing filter: {key} = {value} -> {filter_key}")
+                self._logger.debug(f"🔍 VECTOR_DB: Processing filter: {key} = {value} -> {filter_key}")
                 if isinstance(value, dict):
                     # Handle range queries (gte, lte, gt, lt)
                     range_clause: Dict[str, Any] = {"range": {filter_key: {}}}
@@ -226,36 +228,57 @@ class VectorStoreClient(BaseVectorStore):
                             range_clause["range"][filter_key][bound] = value[bound]
                     if range_clause["range"][filter_key]:
                         filter_clauses.append(range_clause)
-                        self._logger.debug(f" Added range filter: {range_clause}")
+                        self._logger.debug(f"🔍 VECTOR_DB: Added range filter: {range_clause}")
                 elif isinstance(value, list):
                     # Handle multiple values
                     filter_clauses.append({"terms": {filter_key: value}})
-                    self._logger.debug(f" Added terms filter: {filter_key} in {value}")
+                    self._logger.debug(f"🔍 VECTOR_DB: Added terms filter: {filter_key} in {value}")
                 else:
                     # Handle single value
                     filter_clauses.append({"term": {filter_key: value}})
-                    self._logger.debug(f" Added term filter: {filter_key} = {value}")
+                    self._logger.debug(f"🔍 VECTOR_DB: Added term filter: {filter_key} = {value}")
         if filter_clauses:
             es_query["query"] = {"bool": {"filter": filter_clauses}}
-            self._logger.debug(f" Final ES query with filters: {es_query}")
+            self._logger.debug(f"🔍 VECTOR_DB: Final ES query with filters: {es_query}")
         else:
-            self._logger.debug(f" No filters applied, using KNN only")
+            self._logger.debug(f"🔍 VECTOR_DB: No filters applied, using KNN only")
+            
         try:
+            self._logger.debug(f"🔍 VECTOR_DB: Executing Elasticsearch query...")
             resp = self._client.search(index=index, body=es_query, _source=True)
+            self._logger.debug(f"🔍 VECTOR_DB: Elasticsearch query completed successfully")
         except Exception as exc:
-            self._logger.error("Vector store search request failed: %s", exc)
+            self._logger.error(f"🔍 VECTOR_DB: Vector store search request failed: {exc}")
             raise
         
         hits = resp.get("hits", {}).get("hits", [])
-        self._logger.debug(f" Raw hits count: {len(hits)}")
-        # Debug: Show details for first few hits (GENERIC - uses config!)
+        total_hits = resp.get("hits", {}).get("total", {}).get("value", 0)
+        self._logger.debug(f"🔍 VECTOR_DB: Raw hits count: {len(hits)}")
+        self._logger.debug(f"🔍 VECTOR_DB: Total matching documents: {total_hits}")
+        
+        # Log detailed information about each hit
         primary_field = settings.database.primary_display_field
-        for i, hit in enumerate(hits[:5], 1):
+        self._logger.debug(f"🔍 VECTOR_DB: Showing details for {min(len(hits), 10)} hits:")
+        
+        for i, hit in enumerate(hits[:10], 1):
+            score = hit.get("_score", 0.0)
             source = hit.get("_source", {})
             metadata = source.get("metadata", {})
+            text = source.get("text", "")
+            
             display_value = metadata.get(primary_field, "Unknown")
             doc_id = metadata.get("id", "N/A")
-            self._logger.debug(f" Hit {i}: {display_value} (ID: {doc_id})")
+            
+            self._logger.debug(f"🔍 VECTOR_DB: Hit {i}: {display_value} (ID: {doc_id}, Score: {score:.3f})")
+            self._logger.debug(f"🔍 VECTOR_DB: Hit {i} full metadata: {metadata}")
+            self._logger.debug(f"🔍 VECTOR_DB: Hit {i} text preview: {text[:200]}...")
+            
+            # Log key property details
+            if metadata:
+                self._logger.debug(f"🔍 VECTOR_DB: Hit {i} details: Rent={metadata.get('rent_charge', 'N/A')}, "
+                                f"Bedrooms={metadata.get('number_of_bedrooms', 'N/A')}, "
+                                f"Location={metadata.get('emirate', 'N/A')}, {metadata.get('city', 'N/A')}")
+        
         return hits
 
     def delete_by_source_id(self, source_id: str) -> int:

@@ -1,3 +1,9 @@
+"""
+Simple, generic retriever - NO hardcoded logic!
+
+Philosophy: Just retrieve relevant chunks and let LLM decide everything else.
+"""
+
 from __future__ import annotations
 from typing import Any, Dict, List, Optional
 from .config import RetrievalConfig
@@ -7,15 +13,24 @@ from .utils import get_logger
 
 
 class Retriever:
+    """
+    Pure retriever - retrieves chunks based on vector similarity and filters.
+    
+    NO hardcoded logic for:
+    - Boosting/scoring
+    - "Best property" detection
+    - Priority ordering
+    - Special query handling
+    
+    The LLM decides what's relevant based on context!
+    """
+    
     def __init__(self, embedder: BaseEmbedder, store: BaseVectorStore, config: RetrievalConfig) -> None:
         self._embedder = embedder
         self._store = store
         self._config = config
         self._logger = get_logger(__name__)
-        # Cache settings to avoid repeated get_settings() calls (optimization)
-        from .config import get_settings
-        self._settings = get_settings()
-
+    
     def retrieve(
         self, 
         query: str, 
@@ -24,240 +39,103 @@ class Retriever:
         retrieve_for_refinement: bool = False
     ) -> tuple[List[RetrievedChunk], List[RetrievedChunk]]:
         """
-        Retrieve chunks with optional progressive refinement support (GENERIC).
+        Retrieve chunks based on vector similarity.
+        
+        Simple approach:
+        1. Embed query
+        2. Search vector database with filters
+        3. Return results sorted by similarity score
+        4. LLM decides what's relevant!
         
         Args:
             query: Search query
-            filters: Optional filters
-            top_k: Number of results to return to user
-            retrieve_for_refinement: If True, retrieve MORE candidates for future filtering
+            filters: Optional filters (applied at database level)
+            top_k: Number of results
+            retrieve_for_refinement: Ignored (kept for compatibility)
         
         Returns:
-            Tuple of (chunks_to_display, all_candidates_for_storage)
+            Tuple of (chunks_to_display, all_chunks) - same list for simplicity
         """
-        self._logger.debug(f" RETRIEVER DEBUG:")
-        self._logger.debug(f" Query: '{query}'")
-        self._logger.debug(f" Raw filters: {filters}")
-        self._logger.debug(f" Retrieve for refinement: {retrieve_for_refinement}")
+        self._logger.debug(f"🔍 RETRIEVER: Starting retrieval for query: '{query}'")
         
-        if top_k is None and (self._config.top_k in (None, 0)):
-            self._logger.debug("Retrieval top_k not provided and config.top_k is missing/zero; defaulting to 5")
-        k = top_k if top_k is not None else (self._config.top_k or 5)
+        # Get top_k
+        k = top_k if top_k is not None else (self._config.top_k or 12)
         
-        # ADAPTIVE STRATEGY: Retrieve more if this is initial search for refinement
-        if retrieve_for_refinement and not filters:
-            # Initial semantic search - get MORE candidates for progressive filtering
-            refinement_multiplier = getattr(self._config, 'refinement_multiplier', None) or 5
-            k_retrieve = k * refinement_multiplier
-            self._logger.debug(f" INITIAL SEARCH: Retrieving {k_retrieve} candidates (will show {k})")
-        else:
-            # Filtered search or no refinement needed
-            k_retrieve = k
-            self._logger.debug(f" STANDARD SEARCH: Retrieving {k_retrieve} candidates")
+        # Calculate num_candidates for Elasticsearch kNN
+        num_candidates = k * max(1, self._config.num_candidates_multiplier or 8)
         
-        if self._config.num_candidates_multiplier in (None, 0):
-            self._logger.debug("Retrieval num_candidates_multiplier is missing/zero; using 1x top_k")
-        num_candidates = k_retrieve * max(1, self._config.num_candidates_multiplier or 1)
+        self._logger.debug(f"🔍 RETRIEVER: Retrieving {k} chunks (num_candidates: {num_candidates})")
+        self._logger.debug(f"🔍 RETRIEVER: Query: '{query}'")
+        self._logger.debug(f"🔍 RETRIEVER: Filters: {filters}")
+        
+        # Embed query
+        self._logger.debug(f"🔍 RETRIEVER: Embedding query...")
         query_vec = self._embedder.embed([query], task_type="retrieval_query")[0]
+        self._logger.debug(f"🔍 RETRIEVER: Query embedded, vector length: {len(query_vec)}")
         
-        # Apply prioritized context retrieval strategy
-        prioritized_filters = self._apply_prioritized_retrieval_strategy(filters, query)
+        # Validate filters (only include allowed fields)
+        validated_filters = self._validate_filters(filters)
+        self._logger.debug(f"🔍 RETRIEVER: Validated filters: {validated_filters}")
         
-        # Validate filters against allowed fields
-        validated_filters: Optional[Dict[str, Any]] = None
-        if prioritized_filters:
-            allowed = set(self._config.filter_fields or [])
-            validated_filters = {}
-            for key, value in prioritized_filters.items():
-                if key in allowed:
-                    validated_filters[key] = value
-                else:
-                    self._logger.debug("Ignoring invalid filter key '%s'. Allowed: %s", key, sorted(list(allowed)))
-        
-        self._logger.debug(f" Prioritized filters: {prioritized_filters}")
-        self._logger.debug(f" Validated filters: {validated_filters}")
-        self._logger.debug(f" Allowed filter fields: {sorted(list(self._config.filter_fields or []))}")
+        # Search vector database
         try:
-            hits = self._store.search(query_vec, top_k=k, num_candidates=num_candidates, filters=validated_filters)
-            self._logger.debug(f" Found {len(hits)} hits from vector store")
+            self._logger.debug(f"🔍 RETRIEVER: Searching vector store...")
+            hits = self._store.search(
+                query_vec, 
+                top_k=k, 
+                num_candidates=num_candidates, 
+                filters=validated_filters
+            )
+            self._logger.debug(f"🔍 RETRIEVER: Vector store returned {len(hits)} hits")
         except Exception as exc:
-            self._logger.error("Vector store search failed: %s", exc)
+            self._logger.error(f"🔍 RETRIEVER: Vector store search failed: {exc}")
             raise
         
-        # Enhanced scoring with prioritized context retrieval
+        # Convert hits to RetrievedChunk objects
         chunks: List[RetrievedChunk] = []
-        for hit in hits:
-            raw_score = float(hit.get("_score", 0.0))
+        self._logger.debug(f"🔍 RETRIEVER: Processing {len(hits)} hits...")
+        
+        for i, hit in enumerate(hits):
+            score = float(hit.get("_score", 0.0))
             source = hit.get("_source", {})
             metadata = source.get("metadata", {})
+            text = source.get("text", "")
             
-            # Enhanced boost for verified/premium properties with priority scoring
-            boost_score = self._calculate_prioritized_boost(metadata, query)
-            final_score = min(1.0, raw_score + boost_score)
+            self._logger.debug(f"🔍 RETRIEVER: Hit {i+1}: Score={score:.3f}, ID={metadata.get('id', 'unknown')}")
+            self._logger.debug(f"🔍 RETRIEVER: Hit {i+1} metadata: {metadata}")
+            self._logger.debug(f"🔍 RETRIEVER: Hit {i+1} text preview: {text[:200]}...")
             
             chunks.append(
-                RetrievedChunk(score=final_score, text=source.get("text", ""), metadata=metadata)
+                RetrievedChunk(score=score, text=text, metadata=metadata)
             )
         
-        # Apply post-retrieval prioritization for "best property" queries
-        if self._is_best_property_query(query):
-            chunks = self._prioritize_best_properties(chunks)
-        
-        # Sort by score (highest first)
+        # Sort by score (highest first) - that's it!
         chunks.sort(key=lambda x: x.score, reverse=True)
         
-        # Generic debug output (uses config!)
-        primary_field = self._settings.database.primary_display_field
-        pricing_field = self._settings.database.pricing_field
-        currency = self._settings.database.display.currency
+        self._logger.debug(f"🔍 RETRIEVER: Retrieved {len(chunks)} chunks")
+        if chunks:
+            self._logger.debug(f"🔍 RETRIEVER: Top score: {chunks[0].score:.3f}")
+            self._logger.debug(f"🔍 RETRIEVER: Bottom score: {chunks[-1].score:.3f}")
+            
+            # Log all retrieved chunks with details
+            for i, chunk in enumerate(chunks):
+                self._logger.debug(f"🔍 RETRIEVER: Chunk {i+1}: {chunk.metadata.get('property_title', 'Unknown')} (ID: {chunk.metadata.get('id', 'unknown')}, Score: {chunk.score:.3f})")
         
-        self._logger.debug(f" FINAL RESULTS:")
-        for i, chunk in enumerate(chunks[:5], 1):  
-            metadata = chunk.metadata
-            display_value = metadata.get(primary_field, "Unknown")
-            price_value = metadata.get(pricing_field, "N/A") if pricing_field else "N/A"
-            self._logger.debug(f" {i}. {display_value} | {currency} {price_value} | Score: {chunk.score:.3f}")
-        
-        # Return tuple: (chunks_to_display, all_candidates_for_storage)
-        chunks_to_display = chunks[:k]
-        all_candidates = chunks[:k_retrieve]  # All chunks retrieved (for progressive filtering)
-        
-        self._logger.debug(f" Returning: {len(chunks_to_display)} to display, {len(all_candidates)} for storage")
-        return chunks_to_display, all_candidates
-
-# Removed complex scoring methods - now using simple boost approach
-
-    def _apply_prioritized_retrieval_strategy(self, filters: Optional[Dict[str, Any]], query: str) -> Optional[Dict[str, Any]]:
-        """Apply prioritized context retrieval strategy based on config.
-        GENERIC - uses filter_priority_groups from config!
-        """
+        # Return same list for both (simplicity)
+        return chunks, chunks
+    
+    def _validate_filters(self, filters: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Validate filters against allowed fields - that's the ONLY logic here"""
         if not filters:
-            return filters
+            return None
         
-        # Get priority groups from config (GENERIC!)
-        priority_groups = self._settings.database.filter_priority_groups
+        allowed = set(self._config.filter_fields or [])
+        validated = {}
         
-        if not priority_groups:
-            # No priority configuration - return filters as is
-            return filters
-        
-        prioritized_filters = {}
-        
-        # Apply filters in priority order based on config
-        # Common priority order: location, budget, property_type, rooms, furnishing, lease, availability
-        priority_order = ["location", "budget", "property_type", "rooms", "furnishing", "lease", "availability"]
-        
-        for group_name in priority_order:
-            if group_name not in priority_groups:
-                continue
-            group_fields = priority_groups[group_name]
-            for field in group_fields:
-                if field in filters:
-                    prioritized_filters[field] = filters[field]
-        
-        # Add priority features from config (medium priority)
-        priority_fields = self._settings.database.priority_features or []
-        for field in priority_fields:
-            if field in filters and field not in prioritized_filters:
-                prioritized_filters[field] = filters[field]
-        
-        # Add any remaining filters not covered above
         for key, value in filters.items():
-            if key not in prioritized_filters:
-                prioritized_filters[key] = value
+            if key in allowed and value is not None:
+                validated[key] = value
+            else:
+                self._logger.debug(f"Ignoring filter '{key}': not in allowed fields")
         
-        return prioritized_filters
-
-    def _is_best_property_query(self, query: str) -> bool:
-        """Check if query is asking for 'best' properties.
-        GENERIC - uses query_patterns from config!
-        """
-        best_keywords = self._settings.database.query_patterns.get("best_property", [])
-        if not best_keywords:
-            return False  # No patterns configured
-        query_lower = query.lower()
-        return any(keyword in query_lower for keyword in best_keywords)
-
-    def _prioritize_best_properties(self, chunks: List[RetrievedChunk]) -> List[RetrievedChunk]:
-        """Prioritize properties based on boosting and verification status for 'best property' queries.
-        GENERIC - uses boosting config from config!
-        """
-        boosting_config = self._settings.database.boosting
-        
-        # If boosting is disabled, just return chunks as is
-        if not boosting_config or not boosting_config.enabled:
-            return chunks
-        
-        fields = boosting_config.fields
-        active_values = boosting_config.active_values
-        
-        def get_priority_score(chunk: RetrievedChunk) -> int:
-            metadata = chunk.metadata
-            score = 0
-            
-            # Check if all three boosting features are active
-            premium_active = metadata.get(fields.premium) == active_values.premium
-            carousel_active = metadata.get(fields.carousel) == active_values.carousel
-            verification_active = metadata.get(fields.verification) == active_values.verification
-            
-            # Priority 1: All three boosting statuses active
-            if premium_active and carousel_active and verification_active:
-                score += 1000
-            
-            # Priority 2: Verified
-            elif verification_active:
-                score += 800
-            
-            # Priority 3: Carousel
-            elif carousel_active:
-                score += 600
-            
-            # Priority 4: Premium
-            elif premium_active:
-                score += 400
-            
-            # Add base score from vector similarity
-            score += int(chunk.score * 100)
-            
-            return score
-        
-        # Sort by priority score (highest first)
-        chunks.sort(key=get_priority_score, reverse=True)
-        return chunks
-
-    def _calculate_prioritized_boost(self, metadata: Dict[str, Any], query: str) -> float:
-        """Enhanced boost for verified/premium properties with priority scoring.
-        GENERIC - uses boosting config from config!
-        """
-        boosting_config = self._settings.database.boosting
-        
-        # If boosting is disabled, return 0
-        if not boosting_config or not boosting_config.enabled:
-            return 0.0
-        
-        boost = 0.0
-        fields = boosting_config.fields
-        active_values = boosting_config.active_values
-        weights = boosting_config.boost_weights
-        
-        # Check each boosting feature
-        premium_active = metadata.get(fields.premium) == active_values.premium
-        carousel_active = metadata.get(fields.carousel) == active_values.carousel
-        verification_active = metadata.get(fields.verification) == active_values.verification
-        
-        # Apply individual boosts
-        if verification_active:
-            boost += weights.verification
-        
-        if premium_active:
-            boost += weights.premium
-            
-        if carousel_active:
-            boost += weights.carousel
-        
-        # Additional boost for "best property" queries with all three active
-        if self._is_best_property_query(query):
-            if premium_active and carousel_active and verification_active:
-                boost += weights.all_three
-        
-        return min(0.3, boost)  # Cap total boost at 0.3  
+        return validated if validated else None

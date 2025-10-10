@@ -25,7 +25,7 @@ def search_web_for_property_knowledge(query: str) -> Optional[str]:
         # For now, provide intelligent responses based on common UAE property terms
         # This will be replaced with actual web search in production
         
-        logger.info(f"Web search requested for: {query}")
+        logger.debug(f"Web search requested for: {query}")
         
         # Extract key property terms from query
         query_lower = query.lower()
@@ -130,11 +130,11 @@ def search_web_for_property_knowledge(query: str) -> Optional[str]:
         # Search for matching terms in knowledge base
         for term, description in knowledge_base.items():
             if term in query_lower:
-                logger.info(f"Found knowledge for term: {term}")
+                logger.debug(f"Found knowledge for term: {term}")
                 return f"**{term.title()} in UAE Context:**\n\n{description}"
         
         # If no specific term matched, return general guidance
-        logger.info("No specific term matched, returning general response")
+        logger.debug("No specific term matched, returning general response")
         return (
             "I found that in the UAE property market, terms and regulations can be specific to the region. "
             "Common concepts include Ejari registration (mandatory in Dubai), DEWA utilities, chiller fees for AC, "

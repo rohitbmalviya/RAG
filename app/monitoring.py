@@ -62,7 +62,7 @@ class MetricsCollector:
             if metrics.error_occurred:
                 logger.error(f"Query error: {metrics.error_message} (Query: {metrics.query_text[:100]})")
             elif metrics.processing_time_ms > 5000:  # Slow queries
-                logger.warning(f"Slow query: {metrics.processing_time_ms:.0f}ms (Query: {metrics.query_text[:100]})")
+                logger.debug(f"Slow query: {metrics.processing_time_ms:.0f}ms (Query: {metrics.query_text[:100]})")
             
         except Exception as e:
             logger.error(f"Failed to record query metrics: {e}")
@@ -78,9 +78,9 @@ class MetricsCollector:
             
             # Log system issues
             if metrics.error_rate_percent > 5.0:
-                logger.warning(f"High error rate: {metrics.error_rate_percent:.1f}%")
+                logger.debug(f"High error rate: {metrics.error_rate_percent:.1f}%")
             if metrics.memory_usage_mb > 1000:
-                logger.warning(f"High memory usage: {metrics.memory_usage_mb:.0f}MB")
+                logger.debug(f"High memory usage: {metrics.memory_usage_mb:.0f}MB")
                 
         except Exception as e:
             logger.error(f"Failed to record system metrics: {e}")

@@ -60,7 +60,7 @@ def _try_load_dotenv() -> None:
     except ImportError:
         logger.debug("python-dotenv not available, skipping .env file loading")
     except Exception as exc:
-        logger.warning("Failed to load .env file: %s", exc)
+        logger.debug("Failed to load .env file: %s", exc)
 
 def _coerce_value(target_example: Any, value_str: str) -> Any:
     """Coerce ENV value string to match existing config type when possible."""
@@ -76,14 +76,14 @@ def _coerce_value(target_example: Any, value_str: str) -> Any:
         try:
             return int(value_str)
         except ValueError:
-            logger.warning("Failed to convert '%s' to int, keeping as string", value_str)
+            logger.debug("Failed to convert '%s' to int, keeping as string", value_str)
             return value_str
     
     if isinstance(target_example, float):
         try:
             return float(value_str)
         except ValueError:
-            logger.warning("Failed to convert '%s' to float, keeping as string", value_str)
+            logger.debug("Failed to convert '%s' to float, keeping as string", value_str)
             return value_str
     
     if isinstance(target_example, list):
@@ -353,7 +353,7 @@ def _parse_database_url(db_url: str) -> Dict[str, Any]:
             "password": parsed.password or "",
         }
     except Exception as exc:
-        logger.warning("Failed to parse DATABASE_URL: %s", exc)
+        logger.debug("Failed to parse DATABASE_URL: %s", exc)
         return {}
 
 def _setup_logging(settings: Settings) -> None:
@@ -400,7 +400,7 @@ def get_settings(config_path: Optional[str] = None) -> Settings:
     try:
         _log_missing_settings(settings)
     except Exception as exc:
-        logger.warning("Settings validation logging failed: %s", exc)
+        logger.debug("Settings validation logging failed: %s", exc)
     
     return settings
 
@@ -410,7 +410,7 @@ def _log_validation_message(level: str, message: str) -> None:
 
 def _log_config_error(section_name: str, exc: Exception) -> None:
     """Log a configuration validation error."""
-    logger.warning("Failed checking %s config: %s", section_name, exc)
+    logger.debug("Failed checking %s config: %s", section_name, exc)
 
 def _validate_config_section(
     section_name: str, 
@@ -472,7 +472,7 @@ def _log_missing_settings(settings: Settings) -> None:
             if getattr(db, key) in (None, ""):
                 missing_db.append(key)
         if missing_db:
-            logger.warning("Database config missing values: %s", ", ".join(sorted(missing_db)))
+            logger.debug("Database config missing values: %s", ", ".join(sorted(missing_db)))
         
         db_validations = [
             ("columns", "is_empty_list", "warning", "Database config 'columns' is empty; ingestion will have no fields to read"),

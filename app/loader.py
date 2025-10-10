@@ -323,7 +323,7 @@ def _build_media_map(conn: "psycopg.Connection", property_ids: List[str], settin
         except Exception as e:
             # Silently continue if child relation fails
             logger = get_logger(__name__)
-            logger.warning(f"Failed to fetch {relation.name} relation: {e}")
+            logger.debug(f"Failed to fetch {relation.name} relation: {e}")
             continue
     
     return result_map
@@ -574,9 +574,9 @@ def load_documents(settings: Settings, batch_size: int) -> Generator[List[Docume
         dsn = _build_sql_connection_string(db)
         sql = _build_sql_query(table, quoted_id_col, quoted_cols, "", settings)
         
-        logger.info(f"Loading documents from table '{table}' with columns {cols} and dynamically configured relations")
+        logger.debug(f"Loading documents from table '{table}' with columns {cols} and dynamically configured relations")
         if db.id_column not in db.columns:
-            logger.warning("Configured id_column '%s' not present in database.columns; ensure it's selected", db.id_column)
+            logger.debug("Configured id_column '%s' not present in database.columns; ensure it's selected", db.id_column)
         with psycopg.connect(dsn, row_factory=dict_row) as conn:
             with conn.cursor(name="server_cursor") as cur:
                 cur.itersize = batch_size
@@ -593,7 +593,7 @@ def load_documents(settings: Settings, batch_size: int) -> Generator[List[Docume
                         for c in cols:
                             if c not in row and c not in {"media"}:
                                 row_id = str(row[db.id_column])
-                                logger.warning("Row %s missing expected column '%s'", row_id, c)
+                                logger.debug("Row %s missing expected column '%s'", row_id, c)
                         
                         doc = _create_document_from_sql_row(row, table, cols, embed_cols, db.id_column, media_map, settings)
                         documents.append(doc)

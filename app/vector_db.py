@@ -34,6 +34,35 @@ class VectorStoreClient(BaseVectorStore):
         if hasattr(exists, "body"):
             return exists.body
         return bool(exists)
+    
+    def _build_filter_key(self, field_name: str, field_types: Dict[str, str]) -> str:
+        """
+        Build the correct Elasticsearch filter key based on field type from config.
+        
+        For text/keyword fields stored in metadata, they have TEXT type with .keyword subfield.
+        We need to use .keyword for exact matching.
+        
+        Args:
+            field_name: The field name (e.g., 'emirate', 'property_type_name')
+            field_types: Dictionary from config.yaml field_types section
+            
+        Returns:
+            Elasticsearch field path (e.g., 'metadata.emirate.keyword')
+        """
+        field_type = field_types.get(field_name, "").lower()
+        
+        # Base path (all filters go through metadata in our schema)
+        filter_key = f"metadata.{field_name}"
+        
+        # For text/keyword fields in metadata, use .keyword subfield for exact matching
+        # Numeric, boolean, and date fields don't need .keyword
+        if field_type in ["keyword", "text"]:
+            filter_key = f"{filter_key}.keyword"
+            self._logger.debug(f"🔍 VECTOR_DB: Field '{field_name}' is {field_type} → Using .keyword suffix")
+        else:
+            self._logger.debug(f"🔍 VECTOR_DB: Field '{field_name}' is {field_type} → Using as-is")
+        
+        return filter_key
 
     def _get_settings_data(self) -> tuple[List[str], List[str], Dict[str, str]]:
         """Get commonly used settings data to eliminate duplication"""
@@ -206,19 +235,22 @@ class VectorStoreClient(BaseVectorStore):
             "k": top_k,
             "num_candidates": max(num_candidates, top_k),
         }
-        es_query: Dict[str, Any] = {"knn": knn, "size": top_k}
         filter_clauses: List[Dict[str, Any]] = []
         
         if filters:
             allowed = set(settings.retrieval.filter_fields or [])
             self._logger.debug(f"🔍 VECTOR_DB: Allowed filter fields: {sorted(list(allowed))}")
+            
+            # Get field types from config for determining .keyword suffix
+            field_types = settings.database.field_types or {}
+            
             for key, value in filters.items():
                 if key not in allowed or value is None:
                     self._logger.debug(f"🔍 VECTOR_DB: Skipping filter {key}: not allowed or None")
                     continue
                 
-                # Use consistent field mapping - all filters go to metadata unless specified otherwise
-                filter_key = f"metadata.{key}"
+                # Build filter key with .keyword suffix for text/keyword fields
+                filter_key = self._build_filter_key(key, field_types)
                 self._logger.debug(f"🔍 VECTOR_DB: Processing filter: {key} = {value} -> {filter_key}")
                 if isinstance(value, dict):
                     # Handle range queries (gte, lte, gt, lt)
@@ -237,11 +269,23 @@ class VectorStoreClient(BaseVectorStore):
                     # Handle single value
                     filter_clauses.append({"term": {filter_key: value}})
                     self._logger.debug(f"🔍 VECTOR_DB: Added term filter: {filter_key} = {value}")
+        
+        # CRITICAL FIX: Put filters INSIDE kNN (not separate query)
+        # This makes Elasticsearch pre-filter BEFORE doing vector similarity search
         if filter_clauses:
-            es_query["query"] = {"bool": {"filter": filter_clauses}}
-            self._logger.debug(f"🔍 VECTOR_DB: Final ES query with filters: {es_query}")
+            # Simplify: single filter doesn't need bool wrapper
+            if len(filter_clauses) == 1:
+                knn["filter"] = filter_clauses[0]
+                self._logger.debug(f"🔍 VECTOR_DB: Added single filter INSIDE kNN")
+            else:
+                knn["filter"] = {"bool": {"must": filter_clauses}}
+                self._logger.debug(f"🔍 VECTOR_DB: Added multiple filters INSIDE kNN with bool/must")
+            self._logger.debug(f"🔍 VECTOR_DB: kNN filter: {knn.get('filter')}")
         else:
             self._logger.debug(f"🔍 VECTOR_DB: No filters applied, using KNN only")
+        
+        es_query: Dict[str, Any] = {"knn": knn, "size": top_k}
+        self._logger.debug(f"🔍 VECTOR_DB: Final ES query structure: knn with {len(filter_clauses)} filters")
             
         try:
             self._logger.debug(f"🔍 VECTOR_DB: Executing Elasticsearch query...")
@@ -352,15 +396,18 @@ class VectorStoreClient(BaseVectorStore):
         filter_clauses: List[Dict[str, Any]] = []
         if filters:
             allowed = set(settings.retrieval.filter_fields or [])
+            field_types = settings.database.field_types or {}
             self._logger.debug(f" Allowed filter fields: {sorted(list(allowed))}")
+            
             for key, value in filters.items():
                 if key not in allowed or value is None:
                     self._logger.debug(f" Skipping filter {key}: not allowed or None")
                     continue
                 
-                # Use consistent field mapping
-                filter_key = f"metadata.{key}"
+                # Use config-driven field mapping (same as search method)
+                filter_key = self._build_filter_key(key, field_types)
                 self._logger.debug(f" Processing filter: {key} = {value} -> {filter_key}")
+                
                 if isinstance(value, dict):
                     # Handle range queries
                     range_clause: Dict[str, Any] = {"range": {filter_key: {}}}

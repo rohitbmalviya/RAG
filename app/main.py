@@ -359,6 +359,51 @@ async def on_startup() -> None:
         except Exception as exc:
             logger.debug("Failed eager index init: %s", exc)
 
+def _get_search_plan_from_llm(llm_client: Any, user_query: str) -> Dict[str, Any]:
+    """
+    Ask LLM to plan the search strategy.
+    LLM decides: search query, filters, and strategy.
+    
+    Returns:
+        Dict with search_query, filters, strategy
+    """
+    from .instructions import SEARCH_PLANNER_PROMPT
+    import json
+    import re
+    
+    # Get conversation context
+    conversation_summary = llm_client.conversation.get_conversation_summary()
+    
+    # Build prompt from instructions.py
+    prompt = SEARCH_PLANNER_PROMPT.format(
+        conversation_summary=conversation_summary,
+        user_query=user_query
+    )
+    
+    try:
+        # Call LLM to get search plan
+        response = llm_client.generate(prompt)
+        logger.debug(f"🔍 PLANNER: LLM response: {response}")
+        
+        # Extract JSON from response
+        json_match = re.search(r'\{.*\}', response, re.DOTALL)
+        if json_match:
+            search_plan = json.loads(json_match.group(0))
+            logger.debug(f"🔍 PLANNER: Successfully parsed search plan")
+            return search_plan
+        else:
+            logger.debug(f"🔍 PLANNER: No JSON found in LLM response")
+            
+    except Exception as e:
+        logger.debug(f"🔍 PLANNER: Failed to get search plan from LLM: {e}")
+    
+    # Fallback: use query as-is with no filters
+    return {
+        "search_query": user_query,
+        "filters": {},
+        "strategy": "semantic_only"
+    }
+
 @app.post("/query",response_model=QueryResponse)
 async def query_endpoint(request: QueryRequest, http_request: Request) -> QueryResponse:
     """
@@ -409,22 +454,28 @@ async def query_endpoint(request: QueryRequest, http_request: Request) -> QueryR
             logger.error(f"Failed to create session: {exc}")
             raise HTTPException(status_code=500, detail="Failed to initialize session")
         
-        # Pure semantic search - NO filter extraction!
-        # LLM will understand and filter mentally
+        # LLM-DRIVEN SEARCH: LLM plans the search strategy
         chunks = []
         try:
-            top_k = request.top_k or pipeline_state.settings.retrieval.top_k or 20  # Increased to 20 for better coverage
-            logger.info(f"🔍 MAIN: Starting semantic search with top_k={top_k}...")
+            top_k = request.top_k or pipeline_state.settings.retrieval.top_k or 40
+            logger.info(f"🔍 MAIN: Starting LLM-driven search with top_k={top_k}...")
             
-            # Pure semantic search - no filters, just vector similarity
+            # Step 1: Ask LLM to plan the search (LLM decides filters + query)
+            search_plan = _get_search_plan_from_llm(llm_client, request.query)
+            logger.debug(f"🔍 MAIN: LLM search plan: {search_plan}")
+            logger.debug(f"🔍 MAIN: Search query: '{search_plan.get('search_query')}'")
+            logger.debug(f"🔍 MAIN: Filters: {search_plan.get('filters')}")
+            logger.debug(f"🔍 MAIN: Strategy: {search_plan.get('strategy')}")
+            
+            # Step 2: Execute LLM's search plan
             chunks_display, _ = pipeline_state.retriever_client.retrieve(
-                request.query,
-                filters={},  # NO FILTERS - pure semantic search!
+                search_plan.get("search_query", request.query),
+                filters=search_plan.get("filters", {}),
                 top_k=top_k,
                 retrieve_for_refinement=False
             )
             chunks = chunks_display
-            logger.info(f"🔍 MAIN: Semantic search retrieved {len(chunks)} chunks")
+            logger.info(f"🔍 MAIN: LLM-planned search retrieved {len(chunks)} chunks")
             
             # Log chunk details
             for i, chunk in enumerate(chunks):
@@ -435,12 +486,20 @@ async def query_endpoint(request: QueryRequest, http_request: Request) -> QueryR
             logger.error(f"🔍 MAIN: Retrieval failed: {exc}")
             # Continue with empty chunks - LLM can still handle greetings, etc.
         
-        # Let LLM handle everything - it decides how to respond
+        # Let LLM handle everything - it decides how to respond AND which properties to show
         logger.debug(f"🔍 MAIN: Calling LLM chat...")
+        llm_response = ""
+        selected_property_ids = []
+        
         try:
-            answer = llm_client.chat(request.query, retrieved_chunks=chunks)
-            logger.debug(f"🔍 MAIN: LLM response: {len(answer)} chars")
-            logger.debug(f"🔍 MAIN: LLM response content: {answer}")
+            llm_response = llm_client.chat(request.query, retrieved_chunks=chunks)
+            logger.debug(f"🔍 MAIN: LLM response: {len(llm_response)} chars")
+            logger.debug(f"🔍 MAIN: LLM response content: {llm_response}")
+            
+            # Extract answer and property IDs from LLM response
+            answer, selected_property_ids = _extract_answer_and_ids(llm_response)
+            logger.debug(f"🔍 MAIN: Extracted answer: {answer}")
+            logger.debug(f"🔍 MAIN: Selected property IDs: {selected_property_ids}")
             
             # Check if LLM triggered requirement collection
             if "COLLECT_REQUIREMENTS" in answer:
@@ -477,18 +536,35 @@ async def query_endpoint(request: QueryRequest, http_request: Request) -> QueryR
             llm_client.conversation.store_search_results(property_ids)
             logger.debug(f"🔍 MAIN: Stored {len(property_ids)} property IDs for progressive filtering")
         
-        # Prepare sources - ALWAYS show if we have chunks and answer mentions properties
+        # Prepare sources - Show only when answer is showing actual properties
         sources: List[SourceItem] = []
         
-        # Check if answer contains property information (not just greetings)
-        property_indicators = ["bedroom", "property", "apartment", "villa", "townhouse", "aed", "rent", "found"]
-        has_property_content = any(indicator in answer.lower() for indicator in property_indicators)
+        # Check if answer is a greeting/intro (don't show sources for these)
+        greeting_patterns = ["what are you looking for", "how can i help", "tell me what", "i'm leaseoasis", "i'm here to help"]
+        is_greeting = any(pattern in answer.lower() for pattern in greeting_patterns)
         
-        if chunks and has_property_content:
-            # Show ALL retrieved chunks as sources
+        # Check if answer mentions specific property search results
+        result_indicators = ["found", "here are", "take a look", "check them out", "check which", "several", "options"]
+        has_results = any(indicator in answer.lower() for indicator in result_indicators)
+        
+        if chunks and has_results and not is_greeting:
+            # Use LLM-selected property IDs to filter sources (LLM-driven filtering!)
+            if selected_property_ids:
+                # Filter chunks to only include properties the LLM selected
+                filtered_chunks = [
+                    c for c in chunks 
+                    if c.metadata.get("id") in selected_property_ids
+                ]
+                logger.debug(f"🔍 MAIN: LLM selected {len(selected_property_ids)} properties")
+                logger.debug(f"🔍 MAIN: Filtered {len(chunks)} chunks to {len(filtered_chunks)} LLM-selected sources")
+            else:
+                # Fallback: if LLM didn't provide IDs, show top chunks
+                filtered_chunks = chunks[:10]
+                logger.debug(f"🔍 MAIN: No IDs from LLM, showing top {len(filtered_chunks)} chunks")
+            
             sources = [
                 SourceItem(score=c.score, text=c.text, metadata=c.metadata)
-                for c in chunks[:10]  # Top 10 sources
+                for c in filtered_chunks
             ]
             logger.debug(f"Showing {len(sources)} sources")
         
@@ -538,6 +614,44 @@ async def query_endpoint(request: QueryRequest, http_request: Request) -> QueryR
         # Return user-friendly error
         error_message = error_handler.handle_query_error(e, request.query, request.session_id or "default")
         return QueryResponse(answer=error_message, sources=[])
+
+def _extract_answer_and_ids(llm_response: str) -> tuple[str, List[str]]:
+    """
+    Extract answer text and property IDs from LLM response.
+    
+    LLM response format:
+    ```
+    Great news! I found some amazing properties for you!
+    
+    RELEVANT_IDS: ["id1", "id2", "id3"]
+    ```
+    
+    Returns:
+        Tuple of (answer_text, property_ids_list)
+    """
+    import re
+    import json
+    
+    # Split by RELEVANT_IDS marker
+    if "RELEVANT_IDS:" in llm_response:
+        parts = llm_response.split("RELEVANT_IDS:")
+        answer = parts[0].strip()
+        
+        # Extract JSON array from the second part
+        try:
+            ids_section = parts[1].strip()
+            # Find JSON array
+            json_match = re.search(r'\[(.*?)\]', ids_section, re.DOTALL)
+            if json_match:
+                ids_json = f"[{json_match.group(1)}]"
+                property_ids = json.loads(ids_json)
+                logger.debug(f"🔍 EXTRACT: Successfully extracted {len(property_ids)} property IDs")
+                return answer, property_ids
+        except (json.JSONDecodeError, IndexError) as e:
+            logger.debug(f"🔍 EXTRACT: Failed to parse property IDs: {e}")
+    
+    # Fallback: no IDs found, return whole response as answer
+    return llm_response.strip(), []
 
 def _validate_components() -> None:
     """Validate that all required components are initialized"""

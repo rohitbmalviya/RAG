@@ -4,14 +4,11 @@ import time
 from typing import Any, Dict, List, Optional
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
-# Query processor removed - using pure semantic search + LLM intelligence
-# from .query_processor import preprocess_query
 from .chunking import chunk_documents
 from .config import Settings, get_settings
 from .core.base import BaseEmbedder, BaseVectorStore, BaseLLM
 from .loader import load_documents, load_document_by_id
 from .monitoring import get_metrics_collector, get_error_handler, get_performance_monitor, QueryMetrics
-from .models import RetrievedChunk
 from .retriever import Retriever
 from .utils import get_logger
 from .factories import build_embedder, build_llm, build_vector_store
@@ -268,7 +265,6 @@ class PipelineState:
 pipeline_state = PipelineState()
 
 # Session management for conversations
-from datetime import datetime, timedelta
 
 class SessionManager:
     """Manages LLM client sessions for multi-user conversations"""
@@ -363,122 +359,7 @@ async def on_startup() -> None:
         except Exception as exc:
             logger.debug("Failed eager index init: %s", exc)
 
-@app.post(
-    "/query",
-    response_model=QueryResponse,
-    summary="Query UAE Properties",
-    description="""
-    Process natural language queries to find properties in UAE.
-    
-    **Features:**
-    - Conversational AI with memory (tracks session context)
-    - Intelligent filter extraction from natural language
-    - 10 query categories supported (property search, greetings, best properties, average prices, etc.)
-    - UAE-only property scope (Dubai, Abu Dhabi, Sharjah, etc.)
-    - Strict filter compliance (only shows matching properties)
-    - No hallucinations (context-bound responses)
-    
-    **Query Categories:**
-    1. **Property Search** - "Find 2-bedroom apartments in Dubai"
-    2. **Best Properties** - "Show me the best properties in Dubai Marina"
-    3. **Average Prices** - "What's the average rent in Dubai?"
-    4. **General Knowledge** - "What is Ejari?"
-    5. **Greetings** - "Hi, how are you?"
-    6. **Location-Based** - "Properties in Palm Jumeirah"
-    7. **Amenity-Focused** - "Properties with pool and gym"
-    8. **Combination Queries** - "Furnished 2BR in Marina under 150k with pool"
-    9. **Requirement Gathering** - "Save my requirements for later"
-    10. **Conversation Flow** - Multi-turn conversations with context
-    
-    **Rate Limiting:** 60 requests per minute per IP
-    """,
-    response_description="AI-generated answer with property sources (if applicable)",
-    responses={
-        200: {
-            "description": "Successful query - property search results",
-            "content": {
-                "application/json": {
-                    "examples": {
-                        "property_search": {
-                            "summary": "Property Search Query",
-                            "description": "User searches for specific properties",
-                            "value": {
-                                "answer": "I found 3 great apartments in Dubai Marina matching your criteria:\n\n1. **Luxury Apartment** - AED 120,000/year\n   - 2 bedrooms, 2 bathrooms, 850 sq.ft\n   - Furnished, pool, gym, parking\n\n2. **Marina Heights** - AED 135,000/year\n   - 2 bedrooms, 2 bathrooms, 900 sq.ft\n   - Sea view, balcony, concierge\n\nWould you like more details?",
-                                "sources": [
-                                    {
-                                        "score": 0.95,
-                                        "text": "Property: Luxury Apartment\nLocated in: Dubai, Dubai Marina\nRent: AED 120,000/year",
-                                        "metadata": {
-                                            "id": "prop-123",
-                                            "property_title": "Luxury Apartment",
-                                            "rent_charge": 120000,
-                                            "emirate": "dubai"
-                                        }
-                                    }
-                                ]
-                            }
-                        },
-                        "greeting": {
-                            "summary": "Greeting Query",
-                            "description": "User greets the assistant",
-                            "value": {
-                                "answer": "Hello! I'm LeaseOasis, your friendly UAE property assistant. I'm here to help you find the perfect property to lease in Dubai, Abu Dhabi, or other UAE cities. What type of property are you looking for?",
-                                "sources": []
-                            }
-                        },
-                        "average_price": {
-                            "summary": "Average Price Query",
-                            "description": "User asks for average rent statistics",
-                            "value": {
-                                "answer": "Based on 45 properties in Dubai Marina:\n\n**Price Statistics:**\n• **Average Annual Rent:** AED 125,000\n• **Median Annual Rent:** AED 120,000\n• **Price Range:** AED 85,000 - AED 180,000\n\nWould you like to see specific properties in this range?",
-                                "sources": []
-                            }
-                        },
-                        "general_knowledge": {
-                            "summary": "General Knowledge Query",
-                            "description": "User asks for property term definitions",
-                            "value": {
-                                "answer": "**Ejari in UAE Context:**\n\nEjari is a mandatory online registration system for all rental contracts in Dubai, managed by the Dubai Land Department (DLD). It's a legal requirement that protects both landlords and tenants by officially registering the tenancy contract.\n\nWould you like to search for properties to lease?",
-                                "sources": []
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        400: {
-            "description": "Bad Request - Invalid input",
-            "content": {
-                "application/json": {
-                    "example": {
-                        "detail": "Query must not be empty"
-                    }
-                }
-            }
-        },
-        429: {
-            "description": "Too Many Requests - Rate limit exceeded",
-            "content": {
-                "application/json": {
-                    "example": {
-                        "error": "Rate limit exceeded: 60 per minute"
-                    }
-                }
-            }
-        },
-        500: {
-            "description": "Internal Server Error - System issue",
-            "content": {
-                "application/json": {
-                    "example": {
-                        "detail": "Server not initialized"
-                    }
-                }
-            }
-        }
-    },
-    tags=["Query"]
-)
+@app.post("/query",response_model=QueryResponse)
 async def query_endpoint(request: QueryRequest, http_request: Request) -> QueryResponse:
     """
     Simplified query endpoint using generic LLM intelligence.
@@ -726,52 +607,7 @@ def _run_ingestion(batch_size: int, rebuild_index: bool) -> None:
         logger.debug("Upserted %s chunks (errors=%s)", success, errors)
         logger.debug("Ingested totals rows=%s chunks=%s indexed=%s errors=%s", total_rows, total_chunks, total_indexed, total_errors)
 
-@app.post(
-    "/ingest",
-    summary="Ingest Properties into Vector Database",
-    description="""
-    Load properties from PostgreSQL and index them in Elasticsearch for vector search.
-    
-    **Process:**
-    1. Loads properties with `property_status = 'listed'` from database
-    2. Chunks property descriptions into overlapping segments
-    3. Generates embeddings using Gemini embedding model
-    4. Stores vectors in Elasticsearch with metadata
-    
-    **Options:**
-    - `rebuild_index`: Deletes existing index and rebuilds (use for fresh start)
-    - `batch_size`: Number of properties to process at once (default: 500)
-    
-    **Note:** This operation runs in the background. Check logs for progress.
-    
-    **Rate Limiting:** No limit (admin operation)
-    """,
-    responses={
-        200: {
-            "description": "Ingestion started successfully",
-            "content": {
-                "application/json": {
-                    "example": {
-                        "status": "started",
-                        "batch_size": 500,
-                        "rebuild_index": True
-                    }
-                }
-            }
-        },
-        500: {
-            "description": "Server not initialized",
-            "content": {
-                "application/json": {
-                    "example": {
-                        "detail": "Server not initialized"
-                    }
-                }
-            }
-        }
-    },
-    tags=["Ingestion"]
-)
+@app.post("/ingest")
 async def ingest_endpoint(request: IngestRequest, background_tasks: BackgroundTasks) -> Dict[str, Any]:
     if not pipeline_state.settings:
         raise HTTPException(status_code=500, detail=SERVER_NOT_INITIALIZED)
@@ -783,51 +619,7 @@ async def ingest_endpoint(request: IngestRequest, background_tasks: BackgroundTa
     background_tasks.add_task(_run_ingestion, batch_size=batch_size, rebuild_index=request.rebuild_index)
     return {"status": "started", "batch_size": batch_size, "rebuild_index": request.rebuild_index}
 
-@app.post(
-    "/ingest/{property_id}",
-    response_model=UpsertOneResponse,
-    summary="Ingest Single Property",
-    description="""
-    Index or update a single property by ID.
-    
-    **Use Cases:**
-    - Property was just created/updated in database
-    - Need to refresh specific property in search index
-    - Property details changed and need immediate update
-    
-    **Process:**
-    1. Loads property from PostgreSQL by ID
-    2. Chunks and embeds the property data
-    3. Updates Elasticsearch index
-    
-    **Note:** Uses immediate refresh for real-time updates.
-    """,
-    responses={
-        200: {
-            "description": "Property indexed successfully",
-            "content": {
-                "application/json": {
-                    "example": {
-                        "status": "ok",
-                        "indexed_chunks": 1,
-                        "errors": 0
-                    }
-                }
-            }
-        },
-        404: {
-            "description": "Property not found in database",
-            "content": {
-                "application/json": {
-                    "example": {
-                        "detail": "Property not found"
-                    }
-                }
-            }
-        }
-    },
-    tags=["Ingestion"]
-)
+@app.post("/ingest/{property_id}",response_model=UpsertOneResponse)
 async def ingest_single_property(property_id: str) -> UpsertOneResponse:
     try:
         _validate_components()
@@ -849,45 +641,7 @@ async def ingest_single_property(property_id: str) -> UpsertOneResponse:
     success, errors = _upsert_chunks_to_vector_store(chunks, embeddings, refresh=True)
     return UpsertOneResponse(status="ok", indexed_chunks=int(success), errors=int(errors))
 
-@app.delete(
-    "/vectors/{property_id}",
-    response_model=DeleteResponse,
-    summary="Delete Property Vectors",
-    description="""
-    Remove all vector embeddings for a specific property.
-    
-    **Use Cases:**
-    - Property was deleted from database
-    - Property status changed to unlisted
-    - Need to remove property from search results
-    
-    **Note:** This only deletes from Elasticsearch, not from PostgreSQL.
-    """,
-    responses={
-        200: {
-            "description": "Vectors deleted successfully",
-            "content": {
-                "application/json": {
-                    "example": {
-                        "status": "ok",
-                        "deleted": 5
-                    }
-                }
-            }
-        },
-        500: {
-            "description": "Failed to delete vectors",
-            "content": {
-                "application/json": {
-                    "example": {
-                        "detail": "Failed to delete vectors"
-                    }
-                }
-            }
-        }
-    },
-    tags=["Ingestion"]
-)
+@app.delete("/vectors/{property_id}",response_model=DeleteResponse)
 async def delete_vectors_by_id(property_id: str) -> DeleteResponse:
     if not pipeline_state.vector_store_client:
         raise HTTPException(status_code=500, detail=SERVER_NOT_INITIALIZED)
@@ -898,48 +652,7 @@ async def delete_vectors_by_id(property_id: str) -> DeleteResponse:
         raise HTTPException(status_code=500, detail="Failed to delete vectors")
     return DeleteResponse(status="ok", deleted=deleted)
 
-@app.get(
-    "/health",
-    summary="Health Check",
-    description="""
-    Check if the RAG pipeline is ready to process queries.
-    
-    **Returns:**
-    - `status`: Overall system status ("ok" or "error")
-    - `index_ready`: Whether Elasticsearch index is ready for queries
-    
-    **Use this to:**
-    - Monitor system availability
-    - Check before making query requests
-    - Verify successful startup
-    """,
-    responses={
-        200: {
-            "description": "System health status",
-            "content": {
-                "application/json": {
-                    "examples": {
-                        "ready": {
-                            "summary": "System Ready",
-                            "value": {
-                                "status": "ok",
-                                "index_ready": True
-                            }
-                        },
-                        "not_ready": {
-                            "summary": "System Not Ready",
-                            "value": {
-                                "status": "ok",
-                                "index_ready": False
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    },
-    tags=["System"]
-)
+@app.get("/health")
 async def health() -> Dict[str, Any]:
     """Basic health check endpoint."""
     return {"status": "ok", "index_ready": pipeline_state.index_ready}

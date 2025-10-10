@@ -1,6 +1,5 @@
 """Web search utilities for general knowledge queries."""
 from __future__ import annotations
-import os
 from typing import Optional
 from .logger import get_logger
 

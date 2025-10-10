@@ -209,7 +209,6 @@ class PerformanceMonitor:
             }
         except ImportError:
             # Fallback if psutil not available - use basic system info
-            import os
             try:
                 # Basic memory info from /proc/meminfo (Linux)
                 with open('/proc/meminfo', 'r') as f:

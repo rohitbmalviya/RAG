@@ -56,8 +56,6 @@ class Conversation:
         self.last_filters: Dict[str, Any] = {}  
         self.conversation_summary: str = ""
         self.requirement_gathered: bool = False
-        self.search_history: List[Dict[str, Any]] = []  
-        self.alternatives_suggested: List[Dict[str, Any]] = []  
         self.conversation_start_time: float = 0.0
         self.last_activity_time: float = 0.0
         self.user_contact_info: Dict[str, str] = {}  # Store operator name & contact
@@ -95,70 +93,6 @@ class Conversation:
 
     def get_preferences(self) -> Dict[str, Any]:
         return self.user_preferences
-
-    def get_context_for_query(self, current_query: str) -> str:
-        """Get relevant context for current query with enhanced memory"""
-        if not self.messages:
-            return ""
-        
-        
-        recent = self.messages[-6:] if len(self.messages) >= 6 else self.messages
-        context = []
-        
-        for msg in recent:
-            if msg["role"] == "user":
-                
-                content = msg['content'][:100] + "..." if len(msg['content']) > 100 else msg['content']
-                context.append(f"Previously asked: {content}")
-            elif msg["role"] == "assistant":
-                
-                content = msg['content'][:150] + "..." if len(msg['content']) > 150 else msg['content']
-                context.append(f"Assistant response: {content}")
-        
-        return " | ".join(context)
-
-    def add_search_attempt(self, query: str, filters: Dict[str, Any], results_count: int):
-        """Track search attempts for better context"""
-        import time
-        self.search_history.append({
-            "query": query,
-            "filters": filters,
-            "results_count": results_count,
-            "timestamp": time.time()
-        })
-        
-        
-        if len(self.search_history) > 5:
-            self.search_history = self.search_history[-5:]
-
-    def add_alternative_suggestion(self, alternative: Dict[str, Any]):
-        """Track suggested alternatives"""
-        self.alternatives_suggested.append(alternative)
-          
-        if len(self.alternatives_suggested) > 3:
-            self.alternatives_suggested = self.alternatives_suggested[-3:]
-
-    def get_search_context(self) -> str:
-        """Get context about previous searches"""
-        if not self.search_history:
-            return ""
-        
-        recent_searches = []
-        for search in self.search_history[-3:]:  
-            recent_searches.append(f"'{search['query']}' ({search['results_count']} results)")
-        
-        return f"Recent searches: {'; '.join(recent_searches)}"
-
-    def get_alternatives_context(self) -> str:
-        """Get context about suggested alternatives"""
-        if not self.alternatives_suggested:
-            return ""
-        
-        alternatives = []
-        for alt in self.alternatives_suggested:
-            alternatives.append(alt.get('suggestion', 'Unknown'))
-        
-        return f"Suggested alternatives: {'; '.join(alternatives)}"
 
     def set_requirement_gathered(self, gathered: bool):
         self.requirement_gathered = gathered
@@ -1361,13 +1295,12 @@ class LLMClient(BaseLLM):
 
     def _get_fallback_response(self, context: Dict[str, Any]) -> str:
         """Fallback response when LLM fails."""
-        user_input = context["user_input"]
         has_property_data = context["has_property_data"]
         
         if has_property_data:
-            return f"I found some properties that might interest you. Let me show you the details."
+            return "I found some properties that might interest you. Let me show you the details."
         else:
-            return f"I'd be happy to help you find properties in the UAE. Could you tell me more about what you're looking for?"
+            return "I'd be happy to help you find properties in the UAE. Could you tell me more about what you're looking for?"
 
     def _get_conversation_context(self) -> str:
         """Get recent conversation history for short-term memory"""
@@ -1415,25 +1348,6 @@ class LLMClient(BaseLLM):
         except Exception as e:
             self._logger.error(f" Error extracting requirements: {e}")
         return {}
-
-    def _fallback_missing_fields_check(self, requirements: Dict[str, Any]) -> List[str]:
-        """Simple fallback missing field check if LLM fails"""
-        from .config import get_settings
-        settings = get_settings()
-        
-        missing = []
-        
-        # Check for location (any location field)
-        location_fields = settings.database.location_hierarchy if settings.database.location_hierarchy else ['location']
-        has_location = any(requirements.get(field) for field in location_fields)
-        if not has_location:
-            missing.append('location')
-        
-        # Check for pricing field
-        if not requirements.get(settings.database.pricing_field):
-            missing.append(settings.database.pricing_field)
-        
-        return missing
 
     def _ask_for_missing_requirements(self, missing_fields: List[str], extracted_requirements: Dict[str, Any]) -> str:
         """LLM generates friendly, interactive question for missing fields (GENERIC)"""
@@ -1867,87 +1781,6 @@ class LLMClient(BaseLLM):
         self._logger.error("Unexpected end of retry loop")
         return "I apologize, but I encountered an issue. Please try again."
     
-    def _extract_location(self, merged_data: Dict[str, Any]) -> Optional[str]:
-        """Extract location from merged data, checking multiple possible fields"""
-        # Check for location in various forms
-        location_fields = ['location', 'emirate', 'city', 'community']
-        for field in location_fields:
-            if field in merged_data and merged_data[field]:
-                return str(merged_data[field])
-        return None
-    
-    def _extract_rent_charge(self, merged_data: Dict[str, Any]) -> Optional[Any]:
-        """Extract rent_charge from merged data"""
-        rent_charge = merged_data.get("rent_charge")
-        if rent_charge:
-            # If it's a dict with lte/gte, return the dict
-            if isinstance(rent_charge, dict):
-                return rent_charge
-            # If it's a number, return as is
-            elif isinstance(rent_charge, (int, float)):
-                return rent_charge
-            # If it's a string, try to convert to number
-            else:
-                try:
-                    return float(rent_charge)
-                except (ValueError, TypeError):
-                    return str(rent_charge)
-        return None
-    
-    def _extract_rent_charge_value(self, merged_data: Dict[str, Any]) -> Optional[Any]:
-        """Extract rent_charge value for backend (just the number, not the range)"""
-        rent_charge = merged_data.get("rent_charge")
-        if rent_charge:
-            # If it's a dict with lte/gte, return the lte value
-            if isinstance(rent_charge, dict) and "lte" in rent_charge:
-                return rent_charge["lte"]
-            elif isinstance(rent_charge, dict) and "gte" in rent_charge:
-                return rent_charge["gte"]
-            # If it's a number, return as is
-            elif isinstance(rent_charge, (int, float)):
-                return rent_charge
-            # If it's a string, try to convert to number
-            else:
-                try:
-                    return float(rent_charge)
-                except (ValueError, TypeError):
-                    return str(rent_charge)
-        return None
-    
-    def _extract_amenities(self, merged_data: Dict[str, Any]) -> List[str]:
-        """Extract features/amenities from merged data using config (domain-agnostic)"""
-        amenities = []
-        
-        # Check for amenities list
-        if "amenities" in merged_data and isinstance(merged_data["amenities"], list):
-            amenities.extend(merged_data["amenities"])
-        
-        # Check for individual boolean fields from config
-        from .config import get_settings
-        settings = get_settings()
-        feature_config = settings.database.boolean_fields or {}
-        
-        for field, display_label in feature_config.items():
-            if merged_data.get(field) is True:
-                amenities.append(display_label)
-        
-        return list(set(amenities))  # Remove duplicates
-
-    def _save_to_fallback_storage(self, requirements: Dict[str, Any]) -> None:
-        """Save requirements to fallback storage when endpoint fails"""
-        try:
-            fallback_data = {
-                "timestamp": time.time(),
-                "session_id": requirements.get("session_id", ""),
-                "user_query": requirements.get("user_query", ""),
-                "preferences": requirements.get("preferences", {}),
-                "conversation_summary": requirements.get("conversation_summary", ""),
-                "fallback_reason": "endpoint_failure"
-            }
-            self._logger.debug(f"Saved requirements to fallback storage: {fallback_data}")
-        except Exception as e:
-            self._logger.error(f"Failed to save to fallback storage: {e}")
-
     def generate(self, prompt: str) -> str:
         """Fallback for BaseLLM compatibility."""
         return self._safe_generate([{"role": "user", "content": prompt}])

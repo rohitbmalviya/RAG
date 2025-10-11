@@ -35,8 +35,7 @@ class Retriever:
         self, 
         query: str, 
         filters: Optional[Dict[str, Any]] = None, 
-        top_k: Optional[int] = None,
-        retrieve_for_refinement: bool = False
+        top_k: Optional[int] = None
     ) -> tuple[List[RetrievedChunk], List[RetrievedChunk]]:
         """
         Retrieve chunks based on vector similarity.
@@ -51,7 +50,6 @@ class Retriever:
             query: Search query
             filters: Optional filters (applied at database level)
             top_k: Number of results
-            retrieve_for_refinement: Ignored (kept for compatibility)
         
         Returns:
             Tuple of (chunks_to_display, all_chunks) - same list for simplicity

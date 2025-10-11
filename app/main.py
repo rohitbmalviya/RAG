@@ -58,19 +58,6 @@ class SimpleRateLimiter:
         # Add this request
         self.requests[client_ip].append(now)
         return True
-    
-    def cleanup_old_entries(self):
-        """Cleanup old IP entries to prevent memory growth."""
-        now = datetime.now()
-        cutoff = now - timedelta(seconds=self.window_seconds * 2)
-        
-        ips_to_remove = []
-        for ip, requests in self.requests.items():
-            if not requests or all(req_time < cutoff for req_time in requests):
-                ips_to_remove.append(ip)
-        
-        for ip in ips_to_remove:
-            del self.requests[ip]
 
 # Initialize simple rate limiter
 rate_limiter = SimpleRateLimiter(max_requests=60, window_seconds=60)
@@ -301,13 +288,6 @@ class SessionManager:
             del self.sessions[sid]
             del self.last_activity[sid]
             logger.debug(f"Cleaned up expired session: {sid}")
-    
-    def clear_session(self, session_id: str):
-        """Clear a specific session"""
-        if session_id in self.sessions:
-            del self.sessions[session_id]
-            del self.last_activity[session_id]
-            logger.debug(f"Cleared session: {session_id}")
 
 # Replace global conversation_sessions with:
 session_manager = SessionManager(ttl_minutes=30)
@@ -471,8 +451,7 @@ async def query_endpoint(request: QueryRequest, http_request: Request) -> QueryR
             chunks_display, _ = pipeline_state.retriever_client.retrieve(
                 search_plan.get("search_query", request.query),
                 filters=search_plan.get("filters", {}),
-                top_k=top_k,
-                retrieve_for_refinement=False
+                top_k=top_k
             )
             chunks = chunks_display
             logger.info(f"🔍 MAIN: LLM-planned search retrieved {len(chunks)} chunks")

@@ -173,29 +173,13 @@ class Conversation:
         """Track that an entity (property/product/job) was shown to user"""
         self.shown_entities.add(entity_id)
     
-    def was_shown(self, entity_id: str) -> bool:
-        """Check if entity was already shown"""
-        return entity_id in self.shown_entities
-    
     def get_shown_entities(self) -> List[str]:
         """Get list of shown entity IDs"""
         return list(self.shown_entities)
     
-    def update_preferences(self, preferences: Dict[str, Any]) -> None:
-        """Update user preferences from conversation"""
-        self.user_preferences.update(preferences)
-    
     def store_search_results(self, property_ids: List[str]) -> None:
         """Store property IDs from current search for progressive filtering"""
         self.last_search_results = property_ids
-    
-    def get_last_search_results(self) -> List[str]:
-        """Get property IDs from last search"""
-        return self.last_search_results
-    
-    def get_preferences(self) -> Dict[str, Any]:
-        """Get user preferences"""
-        return self.user_preferences
     
     
     def get_conversation_summary(self) -> str:
@@ -231,10 +215,6 @@ class Conversation:
             summary_parts.append(f"{role}: {content}")
         
         return "\n".join(summary_parts)
-    
-    def is_expired(self, ttl_seconds: int = 1800) -> bool:
-        """Check if conversation has expired (30 minutes default)"""
-        return (time.time() - self.last_activity_time) > ttl_seconds
     
     def clear(self) -> None:
         """Clear conversation (keep system prompt)"""
@@ -627,18 +607,3 @@ class LLMClient(BaseLLM):
                 "success": False,
                 "error": str(exc)
             }
-    
-    def clear_conversation(self) -> None:
-        """Clear conversation history"""
-        self.conversation.clear()
-        self.conversation.add_message("system", SYSTEM_PROMPT)
-    
-    def get_conversation_stats(self) -> Dict[str, Any]:
-        """Get conversation statistics"""
-        return {
-            "message_count": len(self.conversation.messages),
-            "interaction_count": self.conversation.interaction_count,
-            "shown_entities_count": len(self.conversation.shown_entities),
-            "has_preferences": bool(self.conversation.user_preferences),
-            "last_activity": self.conversation.last_activity_time
-        }

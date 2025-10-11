@@ -93,8 +93,7 @@ def chunk_documents(
     chunk_overlap: int,
     unit: str = TOKEN_UNIT,
 ) -> List[Document]:
-    """Chunk documents into smaller pieces with optional overlap.
-    Optimized for property data with better context preservation."""
+    """Chunk documents into smaller pieces with optional overlap."""
     logger = get_logger(__name__)
     # Validate parameters
     if chunk_size is None or chunk_size <= 0:
@@ -110,49 +109,14 @@ def chunk_documents(
         if not _validate_document_content(doc, unit, logger):
             continue
         
-        # For property documents, try to preserve complete property information
-        if _is_property_document(doc):
-            chunks = _chunk_property_document(doc, chunk_size, chunk_overlap, unit)
+        # Standard chunking for all documents
+        if unit == CHAR_UNIT:
+            chunks = _chunk_sequence(doc.text, chunk_size, chunk_overlap, is_text=True)
         else:
-            # Standard chunking for non-property documents
-            if unit == CHAR_UNIT:
-                chunks = _chunk_sequence(doc.text, chunk_size, chunk_overlap, is_text=True)
-            else:
-                tokens = _split_text_to_tokens(doc.text)
-                chunks = _chunk_sequence(tokens, chunk_size, chunk_overlap, is_text=False)
+            tokens = _split_text_to_tokens(doc.text)
+            chunks = _chunk_sequence(tokens, chunk_size, chunk_overlap, is_text=False)
         
         # Process chunks into Document objects
         chunked.extend(_process_document_chunks(doc, chunks, unit))
     
     return chunked
-
-def _is_property_document(doc: Document) -> bool:
-    """Check if document is a property document based on metadata."""
-    metadata = doc.metadata or {}
-    return (
-        metadata.get("table") == "properties" or
-        "property_title" in metadata or
-        "emirate" in metadata or
-        "rent_charge" in metadata
-    )
-
-def _chunk_property_document(doc: Document, chunk_size: int, chunk_overlap: int, unit: str) -> List[tuple[str, int]]:
-    """Specialized chunking for property documents to preserve context."""
-    text = doc.text
-    
-    # For property documents, we want to preserve complete property information
-    # If the text is short enough, keep it as one chunk
-    if unit == TOKEN_UNIT:
-        tokens = _split_text_to_tokens(text)
-        if len(tokens) <= chunk_size:
-            return [(text, 0)]
-    else:
-        if len(text) <= chunk_size:
-            return [(text, 0)]
-    
-    # If text is longer, use standard chunking but with better overlap
-    if unit == CHAR_UNIT:
-        return _chunk_sequence(text, chunk_size, chunk_overlap, is_text=True)
-    else:
-        tokens = _split_text_to_tokens(text)
-        return _chunk_sequence(tokens, chunk_size, chunk_overlap, is_text=False)
